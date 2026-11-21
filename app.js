@@ -1,4 +1,4 @@
-// SKP 瀏覽器（瀏覽端）— 開啟 SketchUp 插件匯出的 .glb 瀏覽檔。
+// SKP 瀏覽器（瀏覽端）— 開啟桌面程式「SKP 轉檔上傳」轉出的 .glb 瀏覽檔。
 // 純前端：檔案用檔案選擇器在本機讀取，或從自己的 Google Drive 下載（cloud.js）。
 import * as THREE from './lib/three.module.min.js';
 import { OrbitControls } from './lib/OrbitControls.js';
@@ -6,7 +6,7 @@ import { GLTFLoader } from './lib/GLTFLoader.js';
 import { mergeGeometries } from './lib/BufferGeometryUtils.js';
 import * as cloud from './cloud.js';
 
-const APP_VERSION = '0.3.1';
+const APP_VERSION = '0.4.1';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -127,7 +127,7 @@ function fail(err) {
 async function loadBuffer(buf, name, t0) {
   const head = new Uint8Array(buf, 0, 4);
   if (String.fromCharCode(...head) !== 'glTF') {
-    throw new Error('這不是瀏覽檔（.glb）。請在 SketchUp 用「SKP 瀏覽器 → 匯出瀏覽檔」產生。');
+    throw new Error('這不是瀏覽檔（.glb）。請在電腦用「SKP 轉檔上傳」程式把 .skp 轉檔產生。');
   }
   const tRead = performance.now();
   showLoading('建立模型…');
@@ -136,7 +136,7 @@ async function loadBuffer(buf, name, t0) {
   const tParse = performance.now();
   const extras = (gltf.parser.json.extras || {}).skpViewer || null;
   if (extras && extras.format > FORMAT_VERSION) {
-    toast('這個檔案是較新版的匯出器產生的，部分功能可能無法顯示，請更新瀏覽器網頁。', 5000);
+    toast('這個檔案是較新版的「SKP 轉檔上傳」產生的，部分功能可能無法顯示，請重新打開網頁取得新版。', 5000);
   }
   setModel(gltf.scene, extras);
   fileInfo = { name, bytes: buf.byteLength };
