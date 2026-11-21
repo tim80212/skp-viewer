@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1f2933">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SKP 瀏覽器">
+<title>SKP 瀏覽器</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app" class="empty">
+  <header id="bar">
+    <div id="title"><span id="model-name">SKP 瀏覽器</span><span id="model-meta"></span></div>
+    <label class="btn primary" id="open-btn">
+      <input type="file" id="file" hidden>
+      <span>開啟檔案</span>
+    </label>
+    <button class="btn icon" id="info-btn" title="模型資訊" aria-label="模型資訊">i</button>
+  </header>
+
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="overlay"></div>
+    <div id="readout" hidden></div>
+    <div id="hint" hidden></div>
+  </div>
+
+  <nav id="scenes" aria-label="場景"></nav>
+
+  <footer id="tools">
+    <button class="tool active" data-mode="orbit"><span class="ic">⟳</span><span>瀏覽</span></button>
+    <button class="tool" data-mode="measure"><span class="ic">📏</span><span>量距離</span></button>
+    <button class="tool" data-mode="edge"><span class="ic">╱</span><span>點邊長</span></button>
+    <button class="tool toggle on" id="edges-btn"><span class="ic">▭</span><span>邊線</span></button>
+    <button class="tool" id="home-btn"><span class="ic">⌂</span><span>重設</span></button>
+  </footer>
+
+  <section id="welcome">
+    <div class="card">
+      <h1>SKP 瀏覽器</h1>
+      <p>在手機或平板上看 SketchUp 模型：旋轉、縮放、切換場景、量尺寸。</p>
+      <ol>
+        <li>在 SketchUp 按「延伸程式 → SKP 瀏覽器 → 匯出瀏覽檔」，存成 <b>.glb</b>。</li>
+        <li>把檔案傳到手機（LINE、AirDrop、雲端硬碟都可以），存到「檔案」。</li>
+        <li>按下面的按鈕選那個檔案。</li>
+      </ol>
+      <label class="btn primary big"><input type="file" id="file2" hidden><span>開啟瀏覽檔（.glb）</span></label>
+      <p class="small">檔案只在這台裝置上開啟，不會上傳到任何地方。</p>
+      <p class="small" id="offline-state"></p>
+    </div>
+  </section>
+
+  <section id="info" hidden>
+    <div class="card">
+      <h2>模型資訊</h2>
+      <dl id="info-list"></dl>
+      <h3>操作</h3>
+      <ul class="small">
+        <li>單指拖曳：旋轉　雙指捏合：縮放　雙指拖曳：平移</li>
+        <li>電腦：左鍵旋轉、滾輪縮放、右鍵平移</li>
+        <li>量距離：點兩點（會自動吸附端點／邊線），可以一邊旋轉一邊量</li>
+        <li>點邊長：點一條邊線，顯示它的長度</li>
+      </ul>
+      <button class="btn" id="info-close">關閉</button>
+    </div>
+  </section>
+
+  <div id="loading" hidden><div class="spinner"></div><div id="loading-text">載入中…</div></div>
+  <div id="toast" hidden></div>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
