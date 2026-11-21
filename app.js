@@ -3,9 +3,10 @@
 import * as THREE from './lib/three.module.min.js';
 import { OrbitControls } from './lib/OrbitControls.js';
 import { GLTFLoader } from './lib/GLTFLoader.js';
+import { mergeGeometries } from './lib/BufferGeometryUtils.js';
 import * as cloud from './cloud.js';
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.3.1';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -15,7 +16,7 @@ const overlay = $('#overlay');
 
 // ---------- three.js 基本設定 ----------
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: false });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); // 手機 DPR 3 也只用 2
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xeef1f4);
@@ -184,6 +185,7 @@ function setModel(root, extras) {
   orthoCam.far = bounds.radius * 20 + 100;
   controls.maxDistance = bounds.radius * 8;
   controls.minDistance = 0.02;
+  mergeStatic();
   app.classList.remove('empty');
   clearMeasure();
   setEdges(true);
@@ -269,8 +271,111 @@ function applyVisibility(s) {
   for (const n of taggedNodes) {
     n.obj.visible = !(n.tag && visState.tags.has(n.tag)) && !(n.pid != null && visState.pids.has(n.pid));
   }
+  refreshMerged();
   pickables = null;
   dirty = true;
+}
+
+// ---------- 合併靜態網格（v0.3.1 效能） ----------
+// SketchUp 的每個群組／元件實例原本各是一個網格＋一個邊線物件，大案子每幀要 2000 多次 draw call，
+// 手機的 CPU 光是送 draw call 就要 30 ms 以上（縮放卡頓的主因，見 回報/v0.3.1.md）。
+// 載入後把「材質相同、而且場景切換時一起顯示／隱藏」的網格合併成一個（座標先換成世界座標），
+// 邊線也照同樣的規則合併。只有在某個場景會被隱藏的標記／物件才需要分開（switches）。
+// 另外依位置分區合併，畫面外的區塊照樣會被略過（不分區的話軟體繪圖反而變慢，見回報）。
+const MERGE_MAX_VERTS = 500000;
+let merged = []; // { obj, switches: [節點], isLine }
+let plainLines = []; // 沒合併的邊線（開關邊線時直接切換）
+function mergeStatic() {
+  merged = [];
+  plainLines = lineObjects.slice();
+  if (params.get('merge') === '0') return; // 測試／比較用：不合併
+  const hideTags = new Set();
+  const hidePids = new Set();
+  for (const s of sceneEntries()) {
+    (s.hiddenTags || []).forEach((t) => hideTags.add(t));
+    (s.hiddenPids || []).forEach((p) => hidePids.add(p));
+  }
+  const switchable = new Set(taggedNodes.filter((n) => (n.tag && hideTags.has(n.tag)) || (n.pid != null && hidePids.has(n.pid))).map((n) => n.obj));
+  model.updateMatrixWorld(true);
+  // 記憶體保險：全部展開超過 400 萬個頂點時，重複很多次的元件（同一網格 ≥ 4 份）保留原樣不合併
+  const uses = new Map();
+  let total = 0;
+  model.traverse((o) => {
+    if (!(o.isMesh || o.isLineSegments)) return;
+    uses.set(o.geometry, (uses.get(o.geometry) || 0) + 1);
+    total += o.geometry.attributes.position.count;
+  });
+  const keepRepeated = total > (Number(params.get('mergelimit')) || 4000000);
+  const keptLines = [];
+  const keptMeshes = [];
+  const groups = new Map();
+  const old = [];
+  const cellSize = Math.max(bounds.radius / (Number(new URLSearchParams(location.search).get('cells')) || 6), 2);
+  model.traverse((o) => {
+    if (!(o.isMesh || o.isLineSegments)) return;
+    if (keepRepeated && uses.get(o.geometry) >= 4) { if (o.isLineSegments) keptLines.push(o); else keptMeshes.push(o); return; }
+    const sw = [];
+    for (let p = o; p && p !== model; p = p.parent) if (switchable.has(p)) sw.push(p);
+    const attrs = Object.keys(o.geometry.attributes).sort().join(',') + (o.geometry.index ? '|i' : '|n');
+    // 依位置分區（每區約模型半徑的 1/2）：合併後仍能把畫面外的區塊略過不畫
+    if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+    const c = o.geometry.boundingSphere.center.clone().applyMatrix4(o.matrixWorld);
+    const cell = [c.x, c.y, c.z].map((v, i) => Math.floor((v - bounds.box.min.getComponent(i)) / cellSize)).join(',');
+    const key = `${o.isMesh ? 'm' : 'l'}|${o.material.uuid}|${attrs}|${sw.map((x) => x.id).join(',')}|${cell}`;
+    let g = groups.get(key);
+    if (!g) groups.set(key, (g = { mat: o.material, isLine: !o.isMesh, switches: sw, chunks: [[]], verts: 0 }));
+    const n = o.geometry.attributes.position.count;
+    if (g.verts + n > MERGE_MAX_VERTS && g.chunks[g.chunks.length - 1].length) { g.chunks.push([]); g.verts = 0; }
+    const geo = o.geometry.clone().applyMatrix4(o.matrixWorld);
+    g.chunks[g.chunks.length - 1].push(geo);
+    g.verts += n;
+    old.push(o);
+  });
+  const oldGeos = new Set(old.map((o) => o.geometry));
+  for (const o of old) o.parent.remove(o);
+  oldGeos.forEach((g) => g.dispose());
+  const holder = new THREE.Group();
+  holder.name = '合併網格';
+  meshObjects = keptMeshes.slice();
+  lineObjects = keptLines.slice();
+  plainLines = keptLines.slice();
+  for (const g of groups.values()) {
+    for (const list of g.chunks) {
+      if (!list.length) continue;
+      const geo = list.length === 1 ? list[0] : mergeGeometries(list, false);
+      if (list.length > 1) list.forEach((x) => x.dispose());
+      geo.computeBoundingSphere();
+      const obj = g.isLine ? new THREE.LineSegments(geo, g.mat) : new THREE.Mesh(geo, g.mat);
+      obj.matrixAutoUpdate = false;
+      if (g.isLine) { obj.renderOrder = 1; lineObjects.push(obj); } else meshObjects.push(obj);
+      holder.add(obj);
+      merged.push({ obj, switches: g.switches, isLine: g.isLine });
+    }
+  }
+  model.add(holder); // 跟著 model 一起移除／釋放；holder 本身沒有縮放（座標已是世界座標）
+  holder.matrixAutoUpdate = false;
+  holder.matrix.copy(model.matrixWorld).invert();
+  holder.updateMatrixWorld(true);
+  window.__skpvMerge = { from: old.length, to: merged.length, totalVerts: total, keepRepeated };
+}
+// 測試用：符合條件（標記／pid）的節點底下有沒有看得到的面
+function shownBy(test) {
+  let shown = false;
+  model.traverseVisible((o) => {
+    if (shown || !o.isMesh) return;
+    const m = merged.find((x) => x.obj === o);
+    if (m) { if (m.switches.some((s) => test(s.userData || {}))) shown = true; return; }
+    for (let p = o; p; p = p.parent) if (p.userData && test(p.userData)) { shown = true; return; }
+  });
+  return shown;
+}
+function refreshMerged() {
+  for (const l of plainLines) l.visible = edgesOn;
+  for (const m of merged) {
+    let v = m.switches.every((s) => s.visible);
+    if (m.isLine) v = v && edgesOn;
+    m.obj.visible = v;
+  }
 }
 
 // 場景相機的旋轉／縮放中心。
@@ -364,7 +469,7 @@ $('#home-btn').addEventListener('click', () => {
 // ---------- 邊線 ----------
 function setEdges(on) {
   edgesOn = on;
-  for (const l of lineObjects) l.visible = on;
+  refreshMerged();
   $('#edges-btn').classList.toggle('on', on);
   pickables = null;
   dirty = true;
@@ -500,8 +605,7 @@ function clearMeasure() {
 }
 
 // ---------- 鎖軸（像 SketchUp 一樣用紅／綠／藍軸） ----------
-// 勾哪些軸就只量那些軸的分量：只勾紅＝紅軸方向的距離；紅＋綠＝水平距離（投影到紅綠平面）；
-// 三個都勾或都不勾＝真實距離（三個軸的分量都算進去，就是兩點的直線距離）。
+// 單選（v0.3.1 使用者要求）：一次只能鎖一個軸，選紅＝只量紅軸方向的距離；再按一次已選的＝取消，回到真實距離。
 // 網頁內部是 Y 朝上：SketchUp 紅 X＝(1,0,0)、綠 Y＝(0,0,-1)、藍 Z＝(0,1,0)。
 const AXES = {
   x: { name: '紅', label: 'X', color: 0xd62d2d, css: '#d62d2d', world: new THREE.Vector3(1, 0, 0) },
@@ -510,7 +614,7 @@ const AXES = {
 };
 const AXIS_ORDER = ['x', 'y', 'z'];
 let axes = new Set();
-try { axes = new Set(JSON.parse(localStorage.getItem('skpv-axes') || '[]').filter((k) => AXES[k])); } catch (e) { /* 略過 */ }
+try { axes = new Set(JSON.parse(localStorage.getItem('skpv-axes') || '[]').filter((k) => AXES[k]).slice(0, 1)); } catch (e) { /* 略過 */ }
 const axisLocked = () => axes.size > 0 && axes.size < 3;
 function axesName() { return AXIS_ORDER.filter((k) => axes.has(k)).map((k) => AXES[k].name).join('＋'); }
 // 鎖軸後的向量（世界座標）
@@ -523,14 +627,14 @@ function lockedVector(a, b) {
 }
 let measureKind = 'measure';
 function setAxes(list) {
-  axes = new Set(list.filter((k) => AXES[k]));
+  axes = new Set(list.filter((k) => AXES[k]).slice(-1)); // 單選：只留一個
   try { localStorage.setItem('skpv-axes', JSON.stringify([...axes])); } catch (e) { /* 略過 */ }
   document.querySelectorAll('#axes [data-axis]').forEach((b) => {
     const on = axes.has(b.dataset.axis);
     b.classList.toggle('on', on);
-    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
   });
-  $('#axes-state').textContent = axisLocked() ? `只量${axesName()}` : '真實距離';
+  $('#axes-state').textContent = axisLocked() ? `只量${axesName()}軸` : '真實距離';
   if (measure.a && measure.b && measureKind === 'measure') { // 點完兩點後改勾選：立刻重算、重畫
     setMeasureLine(measure.a.point, measure.b.point);
     showDistance(measure.a, measure.b);
@@ -539,12 +643,10 @@ function setAxes(list) {
 }
 document.querySelectorAll('#axes [data-axis]').forEach((b) => b.addEventListener('click', () => {
   const k = b.dataset.axis;
-  const next = new Set(axes);
-  if (next.has(k)) next.delete(k); else next.add(k);
-  setAxes([...next]);
+  setAxes(axes.has(k) ? [] : [k]); // 再按一次已選的＝取消
 }));
 // 量測線畫在 HTML 疊圖（SVG，3 px 粗、手機上看得清楚），每次重畫時投影到螢幕
-// 沒鎖軸＝紅色直線；鎖軸＝原本兩點的灰色虛線＋各軸分量（軸的顏色）＋兩軸時的投影斜線（紅）
+// 沒鎖軸＝紅色直線；鎖軸＝原本兩點的灰色虛線＋該軸方向的分量（軸的顏色）
 function setMeasureLine(a, b) {
   const segs = [];
   if (measureKind === 'measure' && axisLocked()) {
@@ -557,7 +659,6 @@ function setMeasureLine(a, b) {
       segs.push({ a: p, b: q, color: AXES[k].css, w: 4 });
       p = q;
     }
-    if (axes.size === 2) segs.push({ a, b: p, color: '#d64545', w: 3 });
     measure.end = p;
   } else {
     segs.push({ a, b, color: '#d64545', w: 3 });
@@ -693,7 +794,37 @@ function drawOverlay() {
 }
 
 // ---------- 主迴圈：有變動才重畫（省電） ----------
-controls.addEventListener('change', () => { dirty = true; });
+// 縮放／旋轉時：
+// 1. 拉近到旋轉中心附近（< 25 cm 或模型半徑 1%）時，把中心往前移到下一個面（或前方一段距離），
+//    不然每一步都只走「剩下距離的 5%」，越近越慢、看起來像拉不動（跟 SketchUp 一樣可以一直往前推）。
+// 2. 移動中把解析度降到 1.25 倍，停下 250 ms 後恢復（手機 GPU 每幀要填的像素少一半以上）。
+let lastDist = Infinity;
+let lowRes = false;
+let lowResTimer = 0;
+const FULL_DPR = Math.min(window.devicePixelRatio || 1, 2);
+const MOVE_DPR = Math.min(FULL_DPR, 1.25);
+controls.addEventListener('change', () => {
+  dirty = true;
+  if (model && !anim && camera.isPerspectiveCamera) {
+    const d = camera.position.distanceTo(controls.target);
+    const near = Math.max(0.25, bounds.radius * 0.01);
+    if (d < near && d < lastDist - 1e-6) {
+      const dir = controls.target.clone().sub(camera.position).normalize();
+      const from = controls.target.clone().addScaledVector(dir, 0.05);
+      const rc = new THREE.Raycaster(from, dir, 0, bounds.radius * 2);
+      const hit = rc.intersectObjects(getPickables().meshes, false)[0];
+      const ahead = hit ? d + 0.05 + hit.distance : Math.max(bounds.radius * 0.1, 1);
+      controls.target.copy(camera.position).addScaledVector(dir, Math.max(ahead, near * 4));
+      lastPivot = 'push';
+    }
+    lastDist = camera.position.distanceTo(controls.target);
+  }
+  if (MOVE_DPR < FULL_DPR && params.get('lowres') !== '0') {
+    if (!lowRes) { lowRes = true; renderer.setPixelRatio(MOVE_DPR); resize(); }
+    clearTimeout(lowResTimer);
+    lowResTimer = setTimeout(() => { lowRes = false; renderer.setPixelRatio(FULL_DPR); resize(); dirty = true; }, 250);
+  }
+});
 function loop(now) {
   requestAnimationFrame(loop);
   if (anim) {
@@ -777,6 +908,43 @@ window.skpv = {
   },
   get scenes() { return sceneEntries(); },
   setAxes,
+  // 測試用：這個標記上的面現在有沒有顯示（合併後也要照場景切換）
+  tagShown(tag) { return shownBy((u) => u.tag === tag); },
+  pidShown(pid) { return shownBy((u) => u.pid === pid); },
+  get mergeInfo() { return window.__skpvMerge || null; },
+  // 測試用：效能數字（draw call、三角形、GPU 記憶體估計）
+  perfInfo() {
+    const gl = renderer.getContext();
+    renderer.info.reset();
+    renderer.render(scene, camera);
+    gl.finish();
+    const calls = renderer.info.render.calls;
+    const tris = renderer.info.render.triangles;
+    const lines = renderer.info.render.lines;
+    let meshes = 0, lineObjs = 0, geoBytes = 0, texBytes = 0;
+    const geos = new Set(), texs = new Set();
+    scene.traverse((o) => {
+      if (o.isMesh) meshes++;
+      if (o.isLine) lineObjs++;
+      if (o.geometry && !geos.has(o.geometry)) {
+        geos.add(o.geometry);
+        for (const a of Object.values(o.geometry.attributes)) geoBytes += a.array.byteLength;
+        if (o.geometry.index) geoBytes += o.geometry.index.array.byteLength;
+      }
+      if (o.material && o.material.map && !texs.has(o.material.map)) {
+        texs.add(o.material.map);
+        const im = o.material.map.image;
+        if (im) texBytes += im.width * im.height * 4 * 4 / 3;
+      }
+    });
+    const N = 20;
+    const t0 = performance.now();
+    for (let i = 0; i < N; i++) { renderer.render(scene, camera); }
+    gl.finish();
+    const renderMs = (performance.now() - t0) / N;
+    return { calls, tris, lines, meshes, lineObjs, geoMB: +(geoBytes / 1048576).toFixed(1), texMB: +(texBytes / 1048576).toFixed(1),
+      textures: texs.size, renderMs: +renderMs.toFixed(2), dpr: renderer.getPixelRatio(), canvas: [renderer.domElement.width, renderer.domElement.height] };
+  },
   // 測試用：直接用 SketchUp 公釐座標放兩個量測點（不經過點螢幕）
   measureSU(a, b) {
     const w = (mm) => new THREE.Vector3(mm[0] / 1000, mm[2] / 1000, -mm[1] / 1000);
@@ -790,6 +958,7 @@ window.skpv = {
     return window.__skpvLastMeasure;
   },
   controls,
+  get renderer() { return renderer; },
 };
 cloud.init({ loadBuffer, showLoading, hideLoading, fail, toast });
 setAxes([...axes]);
