@@ -31,6 +31,13 @@
     <div id="overlay"></div>
     <div id="readout" hidden></div>
     <div id="hint" hidden></div>
+    <div id="axes" hidden role="group" aria-label="鎖定軸向">
+      <span class="small">鎖軸</span>
+      <button class="axis" data-axis="x" aria-pressed="false"><i></i>紅 X</button>
+      <button class="axis" data-axis="y" aria-pressed="false"><i></i>綠 Y</button>
+      <button class="axis" data-axis="z" aria-pressed="false"><i></i>藍 Z</button>
+      <span id="axes-state" class="small"></span>
+    </div>
   </div>
 
   <nav id="scenes" aria-label="場景"></nav>

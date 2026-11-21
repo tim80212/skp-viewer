@@ -5,7 +5,7 @@ import { OrbitControls } from './lib/OrbitControls.js';
 import { GLTFLoader } from './lib/GLTFLoader.js';
 import * as cloud from './cloud.js';
 
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.3.0';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -51,6 +51,7 @@ let dirty = true;
 let anim = null;
 let activeScene = -1;
 let fileInfo = {};
+let lastPivot = '';
 
 // ---------- 畫面大小 ----------
 function resize() {
@@ -182,6 +183,7 @@ function setModel(root, extras) {
   orthoCam.near = -bounds.radius * 10;
   orthoCam.far = bounds.radius * 20 + 100;
   controls.maxDistance = bounds.radius * 8;
+  controls.minDistance = 0.02;
   app.classList.remove('empty');
   clearMeasure();
   setEdges(true);
@@ -271,11 +273,30 @@ function applyVisibility(s) {
   dirty = true;
 }
 
+// 場景相機的旋轉／縮放中心。
+// SketchUp 存場景時不保留「目標點」：Page#camera.target 一律被改成眼睛前方約 60 m（實測，research/scene_camera_probe.rb），
+// 常常穿過牆、在地板下或模型外面。直接拿來當 OrbitControls 的中心，旋轉會繞著模型外的一點轉、縮放一步跳很遠、拉不近。
+// 所以只用它的「方向」：從眼睛沿視線找第一個碰到的面當中心；沒碰到就取視線上最靠近模型中心的點。畫面方向完全不變。
+function scenePivot(eye, dir) {
+  const far = eye.distanceTo(bounds.center) + bounds.radius * 2;
+  const rc = new THREE.Raycaster(eye, dir, 0.02, far);
+  const hit = rc.intersectObjects(getPickables().meshes, false).find((h) => h.distance > 0.05);
+  if (hit) return { point: hit.point.clone(), how: 'hit' };
+  let t = bounds.center.clone().sub(eye).dot(dir);
+  if (!(t > bounds.radius * 0.05)) t = Math.max(bounds.radius * 0.5, 1);
+  return { point: eye.clone().addScaledVector(dir, t), how: 'center' };
+}
+
 function setCamera(c, animate) {
   const eye = new THREE.Vector3().fromArray(c.eye);
-  const target = new THREE.Vector3().fromArray(c.target);
+  const rawTarget = new THREE.Vector3().fromArray(c.target);
+  const viewDir = rawTarget.clone().sub(eye).normalize();
+  const pivot = model ? scenePivot(eye, viewDir) : { point: rawTarget, how: 'raw' };
+  const target = pivot.point;
+  lastPivot = pivot.how;
   const dir = target.clone().sub(eye);
   const dist = dir.length() || 1;
+  controls.maxDistance = Math.max(bounds.radius * 8, dist * 2);
   // OrbitControls 固定 Y 軸朝上；正上方往下看時把眼睛往「畫面上方」的反方向挪一點，方向才會和 SketchUp 一樣
   if (Math.abs(dir.clone().normalize().y) > 0.999) {
     const up = new THREE.Vector3().fromArray(c.up || [0, 0, -1]);
@@ -362,6 +383,8 @@ function setMode(m) {
   const hint = $('#hint');
   hint.hidden = !HINTS[m];
   hint.textContent = HINTS[m] || '';
+  $('#axes').hidden = m !== 'measure';
+  app.classList.toggle('axes-on', m === 'measure');
 }
 document.querySelectorAll('.tool[data-mode]').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
@@ -370,7 +393,6 @@ const raycaster = new THREE.Raycaster();
 const tmpV = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 const measure = { a: null, b: null, line: null, preview: null };
-const measureLineMat = new THREE.LineBasicMaterial({ color: 0xd64545, depthTest: false, transparent: true });
 
 function snapRadius(pointerType) {
   return pointerType === 'mouse' ? 12 : 26;
@@ -472,18 +494,77 @@ function pick(x, y, pointerType = 'touch', prefer = 'vertex') {
 }
 
 function clearMeasure() {
-  measure.a = measure.b = measure.preview = null;
-  if (measure.line) { scene.remove(measure.line); measure.line.geometry.dispose(); measure.line = null; }
+  measure.a = measure.b = measure.preview = measure.end = measure.segs = null;
   $('#readout').hidden = true;
   dirty = true;
 }
 
+// ---------- 鎖軸（像 SketchUp 一樣用紅／綠／藍軸） ----------
+// 勾哪些軸就只量那些軸的分量：只勾紅＝紅軸方向的距離；紅＋綠＝水平距離（投影到紅綠平面）；
+// 三個都勾或都不勾＝真實距離（三個軸的分量都算進去，就是兩點的直線距離）。
+// 網頁內部是 Y 朝上：SketchUp 紅 X＝(1,0,0)、綠 Y＝(0,0,-1)、藍 Z＝(0,1,0)。
+const AXES = {
+  x: { name: '紅', label: 'X', color: 0xd62d2d, css: '#d62d2d', world: new THREE.Vector3(1, 0, 0) },
+  y: { name: '綠', label: 'Y', color: 0x229a3c, css: '#229a3c', world: new THREE.Vector3(0, 0, -1) },
+  z: { name: '藍', label: 'Z', color: 0x2563d6, css: '#2563d6', world: new THREE.Vector3(0, 1, 0) },
+};
+const AXIS_ORDER = ['x', 'y', 'z'];
+let axes = new Set();
+try { axes = new Set(JSON.parse(localStorage.getItem('skpv-axes') || '[]').filter((k) => AXES[k])); } catch (e) { /* 略過 */ }
+const axisLocked = () => axes.size > 0 && axes.size < 3;
+function axesName() { return AXIS_ORDER.filter((k) => axes.has(k)).map((k) => AXES[k].name).join('＋'); }
+// 鎖軸後的向量（世界座標）
+function lockedVector(a, b) {
+  const d = b.clone().sub(a);
+  if (!axisLocked()) return d;
+  const out = new THREE.Vector3();
+  for (const k of AXIS_ORDER) if (axes.has(k)) out.addScaledVector(AXES[k].world, d.dot(AXES[k].world));
+  return out;
+}
+let measureKind = 'measure';
+function setAxes(list) {
+  axes = new Set(list.filter((k) => AXES[k]));
+  try { localStorage.setItem('skpv-axes', JSON.stringify([...axes])); } catch (e) { /* 略過 */ }
+  document.querySelectorAll('#axes [data-axis]').forEach((b) => {
+    const on = axes.has(b.dataset.axis);
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  $('#axes-state').textContent = axisLocked() ? `只量${axesName()}` : '真實距離';
+  if (measure.a && measure.b && measureKind === 'measure') { // 點完兩點後改勾選：立刻重算、重畫
+    setMeasureLine(measure.a.point, measure.b.point);
+    showDistance(measure.a, measure.b);
+  }
+  dirty = true;
+}
+document.querySelectorAll('#axes [data-axis]').forEach((b) => b.addEventListener('click', () => {
+  const k = b.dataset.axis;
+  const next = new Set(axes);
+  if (next.has(k)) next.delete(k); else next.add(k);
+  setAxes([...next]);
+}));
+// 量測線畫在 HTML 疊圖（SVG，3 px 粗、手機上看得清楚），每次重畫時投影到螢幕
+// 沒鎖軸＝紅色直線；鎖軸＝原本兩點的灰色虛線＋各軸分量（軸的顏色）＋兩軸時的投影斜線（紅）
 function setMeasureLine(a, b) {
-  if (measure.line) { scene.remove(measure.line); measure.line.geometry.dispose(); }
-  const g = new THREE.BufferGeometry().setFromPoints([a, b]);
-  measure.line = new THREE.Line(g, measureLineMat);
-  measure.line.renderOrder = 10;
-  scene.add(measure.line);
+  const segs = [];
+  if (measureKind === 'measure' && axisLocked()) {
+    segs.push({ a, b, color: '#555', dash: true, w: 2 });
+    const d = b.clone().sub(a);
+    let p = a.clone();
+    for (const k of AXIS_ORDER) {
+      if (!axes.has(k)) continue;
+      const q = p.clone().addScaledVector(AXES[k].world, d.dot(AXES[k].world));
+      segs.push({ a: p, b: q, color: AXES[k].css, w: 4 });
+      p = q;
+    }
+    if (axes.size === 2) segs.push({ a, b: p, color: '#d64545', w: 3 });
+    measure.end = p;
+  } else {
+    segs.push({ a, b, color: '#d64545', w: 3 });
+    measure.end = b;
+  }
+  measure.segs = segs;
+  dirty = true;
 }
 
 // 世界座標（公尺、Y 朝上）→ SketchUp 軸向的公釐
@@ -494,15 +575,22 @@ const fmt = (mm) => Math.round(mm).toLocaleString('en-US');
 const SNAP_NAME = { vertex: '端點', edge: '邊線上', face: '面上' };
 
 function showDistance(a, b, extra = '') {
-  const d = a.point.distanceTo(b.point) * 1000;
+  const real = a.point.distanceTo(b.point) * 1000;
+  const locked = measureKind === 'measure' && axisLocked();
+  const d = locked ? lockedVector(a.point, b.point).length() * 1000 : real;
   const pa = suMM(a.point);
   const pb = suMM(b.point);
+  const comp = { x: Math.abs(pb.x - pa.x), y: Math.abs(pb.y - pa.y), z: Math.abs(pb.z - pa.z) };
   const r = $('#readout');
   r.hidden = false;
-  r.innerHTML = `<div class="big">${fmt(d)} mm</div>` +
-    `<div class="sub">X ${fmt(Math.abs(pb.x - pa.x))}　Y ${fmt(Math.abs(pb.y - pa.y))}　Z ${fmt(Math.abs(pb.z - pa.z))}</div>` +
-    `<div class="snap">${extra || `${SNAP_NAME[a.type]} → ${SNAP_NAME[b.type]}`}</div>`;
-  window.__skpvLastMeasure = { mm: d, a: pa, b: pb, types: [a.type, b.type] };
+  const tag = locked ? `<span class="axtag">${axesName()}</span>` : '';
+  const sub = AXIS_ORDER.map((k) => {
+    const cls = locked && !axes.has(k) ? 'off' : '';
+    return `<span class="ax ${cls}" style="color:${AXES[k].css}">${AXES[k].label} ${fmt(comp[k])}</span>`;
+  }).join('　');
+  r.innerHTML = `<div class="big">${tag}${fmt(d)} mm</div><div class="sub">${sub}</div>` +
+    `<div class="snap">${extra || `${SNAP_NAME[a.type]} → ${SNAP_NAME[b.type]}${locked ? `　真實 ${fmt(real)}` : ''}`}</div>`;
+  window.__skpvLastMeasure = { mm: d, real, axes: locked ? AXIS_ORDER.filter((k) => axes.has(k)).join('') : 'xyz', a: pa, b: pb, comp, types: [a.type, b.type] };
   return d;
 }
 
@@ -518,6 +606,7 @@ function onTap(x, y, pointerType) {
       r.innerHTML = `<div class="snap">第一點：${SNAP_NAME[p.type]}　請點第二點</div>`;
     } else {
       measure.b = p;
+      measureKind = 'measure';
       setMeasureLine(measure.a.point, measure.b.point);
       showDistance(measure.a, measure.b);
     }
@@ -528,6 +617,7 @@ function onTap(x, y, pointerType) {
     if (!p) { toast('沒有點到邊線（請把邊線開啟、點靠近一點）', 1600); return; }
     measure.a = { point: p.seg.a, type: 'vertex' };
     measure.b = { point: p.seg.b, type: 'vertex' };
+    measureKind = 'edge';
     setMeasureLine(p.seg.a, p.seg.b);
     showDistance(measure.a, measure.b, '邊長');
     dirty = true;
@@ -566,12 +656,37 @@ function drawOverlay() {
     if (s.z > 1) return '';
     return `<div class="dot ${p.type} ${cls}" style="left:${s.x}px;top:${s.y}px"></div>`;
   };
+  if (measure.segs) {
+    // 線段兩端投影到螢幕；在相機後面的端點先截到近平面上
+    const lines = [];
+    for (const sg of measure.segs) {
+      let a = sg.a.clone().project(camera);
+      let b = sg.b.clone().project(camera);
+      if (a.z > 1 && b.z > 1) continue;
+      if (a.z > 1 || b.z > 1) {
+        const camDir = camera.getWorldDirection(new THREE.Vector3());
+        const near = camera.position.clone().addScaledVector(camDir, (camera.near || 0.05) * 2);
+        const da = sg.a.clone().sub(near).dot(camDir);
+        const db = sg.b.clone().sub(near).dot(camDir);
+        const t = da / (da - db);
+        const c = sg.a.clone().lerp(sg.b, t).project(camera);
+        if (a.z > 1) a = c; else b = c;
+      }
+      const W = stage.clientWidth;
+      const H = stage.clientHeight;
+      const X = (v) => ((v.x + 1) / 2 * W).toFixed(1);
+      const Y = (v) => ((1 - v.y) / 2 * H).toFixed(1);
+      lines.push(`<line x1="${X(a)}" y1="${Y(a)}" x2="${X(b)}" y2="${Y(b)}" stroke="${sg.color}" stroke-width="${sg.w}" stroke-linecap="round"${sg.dash ? ' stroke-dasharray="6 5"' : ''}/>`);
+    }
+    html += `<svg class="mlines" width="100%" height="100%">${lines.join('')}</svg>`;
+  }
   if (measure.a) html += dot(measure.a, '');
   if (measure.b) {
     html += dot(measure.b, '');
-    const mid = measure.a.point.clone().add(measure.b.point).multiplyScalar(0.5);
+    const end = measure.end || measure.b.point;
+    const mid = measure.a.point.clone().add(end).multiplyScalar(0.5);
     const s = toScreen(mid);
-    if (s.z <= 1) html += `<div class="label" style="left:${s.x}px;top:${s.y}px">${fmt(measure.a.point.distanceTo(measure.b.point) * 1000)}</div>`;
+    if (s.z <= 1) html += `<div class="label" style="left:${s.x}px;top:${s.y}px">${fmt(measure.a.point.distanceTo(end) * 1000)}</div>`;
   }
   if (measure.preview) html += dot(measure.preview, 'preview');
   overlay.innerHTML = html;
@@ -652,8 +767,33 @@ window.skpv = {
   get last() { return window.__skpvLastMeasure; },
   get timing() { return window.__skpvTiming; },
   render() { renderer.render(scene, camera); drawOverlay(); },
+  // 測試用：目前相機狀態（公尺）
+  camInfo() {
+    const r = (v) => v.toArray().map((x) => +x.toFixed(2));
+    return { pos: r(camera.position), target: r(controls.target), dist: +camera.position.distanceTo(controls.target).toFixed(2),
+      R: +bounds.radius.toFixed(2), center: r(bounds.center), ortho: !!camera.isOrthographicCamera, zoom: +camera.zoom.toFixed(3),
+      eyeToCenter: +camera.position.distanceTo(bounds.center).toFixed(2), scene: activeScene, pivot: lastPivot,
+      box: bounds.box ? [r(bounds.box.min), r(bounds.box.max)] : null, eye: camera.position.toArray(), maxD: controls.maxDistance };
+  },
+  get scenes() { return sceneEntries(); },
+  setAxes,
+  // 測試用：直接用 SketchUp 公釐座標放兩個量測點（不經過點螢幕）
+  measureSU(a, b) {
+    const w = (mm) => new THREE.Vector3(mm[0] / 1000, mm[2] / 1000, -mm[1] / 1000);
+    setMode('measure');
+    measure.a = { point: w(a), type: 'vertex' };
+    measure.b = { point: w(b), type: 'vertex' };
+    measureKind = 'measure';
+    setMeasureLine(measure.a.point, measure.b.point);
+    showDistance(measure.a, measure.b);
+    dirty = true;
+    return window.__skpvLastMeasure;
+  },
+  controls,
 };
 cloud.init({ loadBuffer, showLoading, hideLoading, fail, toast });
+setAxes([...axes]);
+if (params.get('axes') != null) setAxes(params.get('axes').split(''));
 $('#cloud-btn').addEventListener('click', () => cloud.showList());
 $('#welcome-cloud').addEventListener('click', () => cloud.showList());
 const first = params.get('m') ? cloud.openCloud(params.get('m')) : params.get('src') ? openUrl(params.get('src')) : null;
