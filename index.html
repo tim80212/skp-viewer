@@ -18,9 +18,10 @@
 <div id="app" class="empty">
   <header id="bar">
     <div id="title"><span id="model-name">SKP 瀏覽器</span><span id="model-meta"></span></div>
+    <button class="btn" id="cloud-btn" title="我的模型（Google Drive）"><span class="long">我的</span>模型</button>
     <label class="btn primary" id="open-btn">
       <input type="file" id="file" hidden>
-      <span>開啟檔案</span>
+      <span>開啟<span class="long">檔案</span></span>
     </label>
     <button class="btn icon" id="info-btn" title="模型資訊" aria-label="模型資訊">i</button>
   </header>
@@ -46,13 +47,14 @@
     <div class="card">
       <h1>SKP 瀏覽器</h1>
       <p>在手機或平板上看 SketchUp 模型：旋轉、縮放、切換場景、量尺寸。</p>
-      <ol>
-        <li>在 SketchUp 按「延伸程式 → SKP 瀏覽器 → 匯出瀏覽檔」，存成 <b>.glb</b>。</li>
-        <li>把檔案傳到手機（LINE、AirDrop、雲端硬碟都可以），存到「檔案」。</li>
-        <li>按下面的按鈕選那個檔案。</li>
+      <button class="btn primary big wide" id="welcome-cloud">我的模型（登入 Google）</button>
+      <label class="btn big wide"><input type="file" id="file2" hidden><span>開啟手機裡的檔案（.glb）</span></label>
+      <ol class="small">
+        <li>在電腦用「SKP 轉檔上傳」程式選 .skp，會自動轉檔並存到你的 Google Drive。</li>
+        <li>手機打開這個網頁、登入同一個 Google 帳號，就能看到全部模型。</li>
+        <li>要給業主看：在清單按「分享連結」，傳到 LINE，對方不用登入就能看那一個模型。</li>
       </ol>
-      <label class="btn primary big"><input type="file" id="file2" hidden><span>開啟瀏覽檔（.glb）</span></label>
-      <p class="small">檔案只在這台裝置上開啟，不會上傳到任何地方。</p>
+      <p class="small">模型直接從 Google Drive 下載到這台裝置，不經過其他伺服器。</p>
       <p class="small" id="offline-state"></p>
     </div>
   </section>
@@ -69,6 +71,23 @@
         <li>點邊長：點一條邊線，顯示它的長度</li>
       </ul>
       <button class="btn" id="info-close">關閉</button>
+    </div>
+  </section>
+
+  <section id="cloud" class="sheet" hidden>
+    <div class="card">
+      <div class="sheet-head"><h2>我的模型</h2><span id="cloud-account" class="small"></span>
+        <button class="btn" id="cloud-logout" hidden>登出</button><button class="btn" id="cloud-close">關閉</button></div>
+      <div id="cloud-list"></div>
+    </div>
+  </section>
+
+  <section id="locked" class="sheet" hidden>
+    <div class="card">
+      <h2>無法開啟這個模型</h2>
+      <p id="locked-text"></p>
+      <button class="btn primary big" id="locked-login">用 Google 登入</button>
+      <button class="btn" id="locked-close">關閉</button>
     </div>
   </section>
 

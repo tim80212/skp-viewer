@@ -29,7 +29,7 @@ button { font: inherit; color: inherit; }
 /* ---------- 上方列 ---------- */
 #bar { grid-area: bar; display: flex; align-items: center; gap: 8px; background: var(--bar); color: var(--bar-fg);
   padding: var(--safe-t) calc(10px + var(--safe-r)) 0 calc(12px + var(--safe-l)); z-index: 3; }
-#title { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+#title { flex: 1 1 0; min-width: 0; overflow: hidden; display: flex; flex-direction: column; line-height: 1.2; }
 #model-name { font-weight: 600; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #model-meta { font-size: 11px; opacity: .7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; border-radius: 8px;
@@ -83,8 +83,8 @@ button { font: inherit; color: inherit; }
 .empty #tools .tool, .empty #info-btn { pointer-events: none; opacity: .35; }
 
 /* ---------- 對話框 ---------- */
-#welcome, #info { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 5; }
-#info { background: rgba(0,0,0,.35); }
+#welcome, #info, .sheet { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 5; }
+#info, .sheet { background: rgba(0,0,0,.35); }
 #welcome { top: calc(var(--bar-h) + var(--safe-t)); }
 #app:not(.empty) #welcome { display: none; }
 .card { background: #fff; border-radius: 14px; padding: 18px 20px; max-width: 460px; width: 100%; box-shadow: 0 6px 30px rgba(0,0,0,.15);
@@ -105,7 +105,29 @@ dd { margin: 0; word-break: break-all; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #toast { position: absolute; left: 50%; bottom: calc(var(--tools-h) + var(--safe-b) + 70px); transform: translateX(-50%); background: rgba(31,41,51,.92);
   color: #fff; padding: 10px 16px; border-radius: 10px; font-size: 14px; z-index: 7; max-width: 90%; text-align: center; }
+#bar #cloud-btn { background: transparent; color: var(--bar-fg); border-color: rgba(255,255,255,.35); padding: 0 10px; }
+.btn.wide { display: flex; width: 100%; }
+.sheet { z-index: 6; padding: calc(10px + var(--safe-t)) calc(10px + var(--safe-r)) calc(10px + var(--safe-b)) calc(10px + var(--safe-l)); }
+#cloud .card { max-width: 640px; height: 100%; display: flex; flex-direction: column; padding: 14px 14px 10px; }
+.sheet-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.sheet-head h2 { margin: 0; flex: 0 0 auto; }
+.sheet-head .small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cloud-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; padding: 0 4px; }
+.cloud-msg { text-align: center; padding: 30px 10px; color: var(--muted); font-size: 14px; }
+.mitem { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
+.mitem.current { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.mopen { display: flex; gap: 12px; width: 100%; padding: 10px; border: 0; background: none; text-align: left; cursor: pointer; align-items: center; }
+.mthumb { flex: 0 0 96px; height: 60px; border-radius: 8px; background: #e4e7eb url(icons/icon-192.png) center/32px no-repeat; overflow: hidden; }
+.mthumb img { width: 100%; height: 100%; object-fit: cover; display: block; background: #fff; }
+.mtext { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mtext b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mshare { font-size: 11px; color: var(--muted); }
+.mshare.on { color: #2f8132; font-weight: 700; }
+.macts { display: flex; gap: 8px; padding: 0 10px 10px; justify-content: flex-end; }
+#locked .card .btn { margin-right: 8px; }
 [hidden] { display: none !important; }
+#bar .btn { flex: 0 0 auto; }
+@media (max-width: 480px) { #bar .long { display: none; } #bar .btn:not(.icon) { padding: 0 10px; } }
 
 /* ---------- 橫向：場景改成左側清單、工具列放右側 ---------- */
 @media (orientation: landscape) and (min-width: 600px) {

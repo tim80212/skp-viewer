@@ -1,10 +1,11 @@
 // SKP 瀏覽器（瀏覽端）— 開啟 SketchUp 插件匯出的 .glb 瀏覽檔。
-// 純前端、不連網：檔案用檔案選擇器在本機讀取，不會上傳。
+// 純前端：檔案用檔案選擇器在本機讀取，或從自己的 Google Drive 下載（cloud.js）。
 import * as THREE from './lib/three.module.min.js';
 import { OrbitControls } from './lib/OrbitControls.js';
 import { GLTFLoader } from './lib/GLTFLoader.js';
+import * as cloud from './cloud.js';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.2.0';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -91,6 +92,7 @@ window.addEventListener('drop', (e) => {
 });
 
 async function openFile(file) {
+  history.replaceState(null, '', location.pathname); // 本機檔案沒有分享網址
   showLoading(`讀取 ${file.name}…`);
   const t0 = performance.now();
   try {
@@ -143,7 +145,7 @@ async function loadBuffer(buf, name, t0) {
   window.__skpvTiming = fileInfo.timing;
   hideLoading();
   updateMeta();
-  document.title = `${data.title || name} — SKP 瀏覽器`;
+  document.title = `${data.title || name.replace(/\.glb$/i, '')} — SKP 瀏覽器`;
 }
 
 function setModel(root, extras) {
@@ -611,7 +613,7 @@ function toast(text, ms = 2000) {
 }
 function mb(bytes) { return bytes < 1048576 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
 function updateMeta() {
-  $('#model-name').textContent = data.title || fileInfo.name || '模型';
+  $('#model-name').textContent = data.title || (fileInfo.name || '模型').replace(/\.glb$/i, '');
   const st = data.stats || {};
   $('#model-meta').textContent = `${mb(fileInfo.bytes)} · ${(data.scenes || []).length} 個場景 · 載入 ${(fileInfo.timing.total / 1000).toFixed(1)} 秒`;
   const rows = [
@@ -651,8 +653,12 @@ window.skpv = {
   get timing() { return window.__skpvTiming; },
   render() { renderer.render(scene, camera); drawOverlay(); },
 };
-if (params.get('src')) {
-  openUrl(params.get('src')).then(() => {
+cloud.init({ loadBuffer, showLoading, hideLoading, fail, toast });
+$('#cloud-btn').addEventListener('click', () => cloud.showList());
+$('#welcome-cloud').addEventListener('click', () => cloud.showList());
+const first = params.get('m') ? cloud.openCloud(params.get('m')) : params.get('src') ? openUrl(params.get('src')) : null;
+if (first) {
+  first.then(() => {
     if (!model) return;
     if (params.get('scene') != null) goScene(Number(params.get('scene')), false);
     if (params.get('edges') === '0') setEdges(false);
