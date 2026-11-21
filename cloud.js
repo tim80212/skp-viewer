@@ -114,7 +114,30 @@ async function api(path, { method = 'GET', query = {}, body, raw = false, useKey
 
 // ---------- 開啟雲端模型 ----------
 async function download(id, useKey) {
-  const meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,appProperties' }, useKey });
+  let meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,appProperties' }, useKey });
+  const mainName = meta.name;
+  const mainReq = id;
+  const mobileId = meta.appProperties && meta.appProperties.mobile;
+  // 手機：有「手機版」（桌面程式 v0.5 起自動產生：貼圖縮小）就改下載手機版（v0.5）
+  if (ui.device === 'phone' && mobileId && params.get('full') !== '1') {
+    try {
+      const m = await api(`/files/${encodeURIComponent(mobileId)}`, { query: { fields: 'id,name,size' }, useKey });
+      meta = { ...m, name: mainName };
+      id = mobileId;
+      ui.toast(`手機自動改用手機版（${mb(Number(m.size || 0))}，貼圖較小）`, 3500);
+    } catch (e) { /* 手機版不見了就用原檔 */ }
+  } else if (Number(meta.size || 0) / 1048576 > (ui.warnMB || Infinity)) {
+    const size = mb(Number(meta.size || 0));
+    if (!confirm(`這個模型很大（${size}），${ui.device === 'phone' ? '手機' : '這台裝置'}的記憶體可能不夠、開到一半網頁會被重新整理。\n\n` +
+      '建議：請上傳的人用新版「SKP 轉檔上傳」重新上傳（會自動產生手機版），或改用電腦／平板開。\n\n仍要試著開啟嗎？')) {
+      const err = new Error(`沒有開啟：模型 ${size}，超過${ui.device === 'phone' ? '手機' : '這台裝置'}建議的大小。請用電腦或平板開，或請上傳的人重新上傳（新版會自動產生手機版）。`);
+      err.shown = true;
+      ui.hideLoading();
+      if (ui.showProblem) ui.showProblem('沒有開啟這個模型', err.message, false);
+      throw err;
+    }
+  }
+  if (ui.loadBegin) ui.loadBegin({ name: meta.name, size: Number(meta.size || 0), id });
   ui.showLoading(`下載 ${meta.name}（${mb(Number(meta.size || 0))}）…`);
   const res = await api(`/files/${encodeURIComponent(id)}`, { query: { alt: 'media' }, raw: true, useKey });
   const total = Number(meta.size || res.headers.get('Content-Length') || 0);
@@ -134,6 +157,7 @@ async function download(id, useKey) {
     buf = got === total ? out.buffer : null;
   }
   if (!buf) buf = await (await api(`/files/${encodeURIComponent(id)}`, { query: { alt: 'media' }, raw: true, useKey })).arrayBuffer();
+  window.__skpvCloudLoaded = { requested: mainReq, loaded: id, mobile: id !== mainReq }; // 測試用
   return { buf, name: meta.name };
 }
 
@@ -166,6 +190,7 @@ export async function openCloud(id) {
     $('#locked').hidden = true;
     ui.onLoaded && ui.onLoaded();
   } catch (err) {
+    if (err.shown) return; // 已經顯示原因（例如手機上太大的模型、使用者選擇不開）
     if (err.status === 404) {
       ui.hideLoading();
       showLocked(id, true);
@@ -249,7 +274,7 @@ function renderList() {
     return `<div class="mitem${f.id === currentId ? ' current' : ''}" data-id="${esc(f.id)}">
       <button class="mopen" data-act="open"><span class="mthumb">${thumb}</span>
         <span class="mtext"><b>${esc(name)}</b><span class="small">${when} · ${mb(Number(f.size || 0))}${f.appProperties && f.appProperties.scenes ? ` · ${esc(f.appProperties.scenes)} 個場景` : ''}</span>
-        <span class="mshare ${shared ? 'on' : ''}">${shared ? '有連結就能看' : '只有我'}</span></span></button>
+        <span class="mshare ${shared ? 'on' : ''}">${shared ? '有連結就能看' : '只有我'}${f.appProperties && f.appProperties.mobile ? ' · 有手機版' : ''}</span></span></button>
       <div class="macts"><button class="btn" data-act="share">${shared ? '複製分享連結' : '分享連結'}</button>
         ${shared ? '<button class="btn" data-act="unshare">取消分享</button>' : ''}</div></div>`;
   }).join('');
@@ -271,6 +296,11 @@ async function shareFile(id) {
     f.permissionIds = [...(f.permissionIds || []), 'anyoneWithLink'];
     renderList();
   }
+  // 手機版也要分享，手機開分享連結時才拿得到（v0.5）
+  const mob = f && f.appProperties && f.appProperties.mobile;
+  if (mob) {
+    try { await api(`/files/${encodeURIComponent(mob)}/permissions`, { method: 'POST', body: { role: 'reader', type: 'anyone', allowFileDiscovery: false } }); } catch (e) { /* 略過 */ }
+  }
   const url = shareUrl(id);
   const title = f ? f.name.replace(/\.glb$/i, '') : 'SKP 模型';
   if (navigator.share && matchMedia('(pointer: coarse)').matches) {
@@ -287,6 +317,10 @@ async function unshareFile(id) {
   if (!confirm('取消分享後，之前傳出去的連結別人就打不開了。確定？')) return;
   await api(`/files/${encodeURIComponent(id)}/permissions/anyoneWithLink`, { method: 'DELETE' });
   const f = files.find((x) => x.id === id);
+  const mob = f && f.appProperties && f.appProperties.mobile;
+  if (mob) {
+    try { await api(`/files/${encodeURIComponent(mob)}/permissions/anyoneWithLink`, { method: 'DELETE' }); } catch (e) { /* 略過 */ }
+  }
   if (f) f.permissionIds = (f.permissionIds || []).filter((p) => p !== 'anyoneWithLink');
   renderList();
   ui.toast('已取消分享');

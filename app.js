@@ -5,8 +5,9 @@ import { OrbitControls } from './lib/OrbitControls.js';
 import { GLTFLoader } from './lib/GLTFLoader.js';
 import { mergeGeometries } from './lib/BufferGeometryUtils.js';
 import * as cloud from './cloud.js';
+import * as mem from './memory.js';
 
-const APP_VERSION = '0.4.1';
+const APP_VERSION = '0.5.0';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -53,6 +54,8 @@ let anim = null;
 let activeScene = -1;
 let fileInfo = {};
 let lastPivot = '';
+let loadInfo = {};
+let edgesAutoOff = false;
 
 // ---------- 畫面大小 ----------
 function resize() {
@@ -94,6 +97,7 @@ window.addEventListener('drop', (e) => {
 });
 
 async function openFile(file) {
+  loadBegin({ name: file.name, size: file.size });
   history.replaceState(null, '', location.pathname); // 本機檔案沒有分享網址
   showLoading(`讀取 ${file.name}…`);
   const t0 = performance.now();
@@ -106,6 +110,7 @@ async function openFile(file) {
 }
 
 async function openUrl(url) {
+  loadBegin({ name: decodeURIComponent(url.split('/').pop()), size: 0 });
   showLoading('下載中…');
   const t0 = performance.now();
   try {
@@ -120,9 +125,52 @@ async function openUrl(url) {
 
 function fail(err) {
   hideLoading();
+  loadEnd();
+  if (loadingModel) {
+    loadingModel = false;
+    showProblem('模型開不起來', `${err && err.message ? err.message : err}`, true);
+    console.error(err);
+    return;
+  }
   console.error(err);
   toast(String(err && err.message ? err.message : err), 5000);
 }
+
+// ---------- 載入失敗偵測（v0.5） ----------
+// 手機記憶體不夠時，iPhone Safari／Android Chrome 會直接把分頁重新載入，網頁來不及顯示任何訊息。
+// 所以開始載入前先在 localStorage 記一筆「正在載入 X」，成功或正常失敗都會清掉；
+// 下次打開網頁還看到這一筆（10 分鐘內），就知道上次是載入到一半被重新載入，顯示原因。
+const LOAD_KEY = 'skpv-loading';
+let loadingModel = false;
+function loadBegin(info) {
+  loadingModel = true;
+  try { localStorage.setItem(LOAD_KEY, JSON.stringify({ ...info, t: Date.now(), ua: navigator.userAgent.slice(0, 120) })); } catch (e) { /* 略過 */ }
+}
+function loadEnd() {
+  try { localStorage.removeItem(LOAD_KEY); } catch (e) { /* 略過 */ }
+}
+function checkLastLoad() {
+  let last = null;
+  try { last = JSON.parse(localStorage.getItem(LOAD_KEY) || 'null'); } catch (e) { /* 略過 */ }
+  loadEnd();
+  if (!last || Date.now() - last.t > 10 * 60 * 1000) return null;
+  const what = `「${last.name || '模型'}」${last.size ? `（${mb(last.size)}）` : ''}`;
+  showProblem('上次沒有開成功', `上次開啟${what}時，網頁在載入途中被重新整理了。這通常是<b>手機記憶體不夠</b>（模型或貼圖太大），瀏覽器把網頁關掉重開。` +
+    '<ul><li>在電腦或平板開同一個連結通常可以。</li><li>請上傳的人在電腦的「SKP 轉檔上傳」（v0.5 以上）選這個模型、按「<b>建立手機版</b>」，之後手機開同一個連結會自動用手機版。</li></ul>', false);
+  return last;
+}
+function showProblem(title, html, isError) {
+  $('#problem-title').textContent = title;
+  $('#problem-text').innerHTML = html;
+  $('#problem').hidden = false;
+  $('#problem').classList.toggle('error', !!isError);
+}
+$('#problem-close').addEventListener('click', () => { $('#problem').hidden = true; });
+canvas.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  hideLoading();
+  showProblem('畫面被手機關掉了', '顯示卡的記憶體不夠（WebGL context lost），通常是模型或貼圖太大。請重新整理網頁；如果一直發生，請在電腦用「SKP 轉檔上傳」重新上傳較小的版本（壓縮貼圖 1024）。', true);
+}, false);
 
 async function loadBuffer(buf, name, t0) {
   const head = new Uint8Array(buf, 0, 4);
@@ -131,9 +179,25 @@ async function loadBuffer(buf, name, t0) {
   }
   const tRead = performance.now();
   showLoading('建立模型…');
+  // 依裝置的記憶體預算決定貼圖最大邊長，載入時直接解碼成小尺寸（v0.5）
+  const scan = mem.scanGlb(buf);
+  const maxTex = renderer.capabilities.maxTextureSize;
+  const pickCap = mem.chooseCap(scan.images, maxTex);
+  const texStats = { count: 0, resized: 0, skipped: 0, skippedList: [], gpuMB: 0, maxDim: 0 };
   const loader = new GLTFLoader();
+  loader.register((parser) => {
+    parser.textureLoader = mem.makeTextureLoader(pickCap.cap, texStats);
+    return { name: 'skpv_texture_budget' };
+  });
+  if (pickCap.cap < 4096 && scan.images.length) showLoading(`建立模型…（${mem.DEVICE === 'phone' ? '手機' : '平板'}：貼圖縮到 ${pickCap.cap} px）`);
   const gltf = await new Promise((resolve, reject) => loader.parse(buf, '', resolve, reject));
   const tParse = performance.now();
+  loadInfo = {
+    device: mem.DEVICE, fileMB: +(buf.byteLength / 1048576).toFixed(1), textures: scan.images.length,
+    texCap: pickCap.cap, texBudgetMB: mem.TEX_BUDGET_MB, texFullMB: Math.round(pickCap.fullMb), texMB: Math.round(texStats.gpuMB),
+    resized: texStats.resized, skipped: texStats.skipped, skippedList: texStats.skippedList.slice(0, 5), maxTexture: maxTex,
+  };
+  window.__skpvLoadInfo = loadInfo;
   const extras = (gltf.parser.json.extras || {}).skpViewer || null;
   if (extras && extras.format > FORMAT_VERSION) {
     toast('這個檔案是較新版的「SKP 轉檔上傳」產生的，部分功能可能無法顯示，請重新打開網頁取得新版。', 5000);
@@ -146,7 +210,12 @@ async function loadBuffer(buf, name, t0) {
   fileInfo.timing = { read: tRead - t0, parse: tParse - tRead, firstFrame: tFirst - tParse, total: tFirst - t0 };
   window.__skpvTiming = fileInfo.timing;
   hideLoading();
+  loadEnd();
+  loadingModel = false;
   updateMeta();
+  if (loadInfo.skipped) toast(`有 ${loadInfo.skipped} 張超大貼圖（${loadInfo.skippedList.join('、')}）手機記憶體放不下，先用灰色顯示`, 6000);
+  else if (loadInfo.resized && mem.DEVICE !== 'desktop') toast(`${mem.DEVICE === 'phone' ? '手機' : '平板'}記憶體有限：${loadInfo.resized} 張貼圖縮到 ${loadInfo.texCap} px 顯示`, 3500);
+  if (edgesAutoOff) toast('模型很大，邊線先關閉（按下方「邊線」可以打開）', 4000);
   document.title = `${data.title || name.replace(/\.glb$/i, '')} — SKP 瀏覽器`;
 }
 
@@ -170,6 +239,7 @@ function setModel(root, extras) {
       lineObjects.push(o);
     } else if (o.isMesh) {
       o.material = convertMaterial(o.material, matCache);
+      if (LITE) liteGeometry(o.geometry);
       meshObjects.push(o);
     }
   });
@@ -186,9 +256,14 @@ function setModel(root, extras) {
   controls.maxDistance = bounds.radius * 8;
   controls.minDistance = 0.02;
   mergeStatic();
+  // 手機：邊線非常多時先關掉（看不到的邊線不會佔顯示記憶體），使用者可以自己打開
+  let segs = 0;
+  for (const l of lineObjects) segs += (l.geometry.index ? l.geometry.index.count : l.geometry.attributes.position.count) / 2;
+  edgesAutoOff = mem.DEVICE === 'phone' && segs > 1000000;
+  loadInfo.edgeSegments = segs;
   app.classList.remove('empty');
   clearMeasure();
-  setEdges(true);
+  setEdges(!edgesAutoOff);
   buildSceneList();
   const start = data.selectedScene != null && data.scenes[data.selectedScene] ? data.selectedScene + 1 : 0;
   goScene(start, false);
@@ -204,6 +279,7 @@ function convertMaterial(m, cache) {
     color: m.color ? m.color.clone() : new THREE.Color(0xf2f2f2),
     map: m.map || null,
     side: THREE.DoubleSide,
+    flatShading: LITE, // 手機：沒有法線，改用 GPU 算每個面的法線（本來就是平面著色，看起來一樣）
     transparent: !!m.transparent,
     opacity: m.opacity != null ? m.opacity : 1,
     alphaTest: m.alphaTest || 0,
@@ -217,6 +293,15 @@ function convertMaterial(m, cache) {
   m.dispose();
   cache.set(m, out);
   return out;
+}
+
+// 手機省記憶體（v0.5）：不要法線（flatShading 代替，網格約省 37%）。UV 要留著（點選／量測時 three.js 會讀）
+const LITE = mem.DEVICE === 'phone' && new URLSearchParams(location.search).get('lite') !== '0';
+const liteDone = new WeakSet();
+function liteGeometry(g) {
+  if (liteDone.has(g)) return;
+  liteDone.add(g);
+  if (g.attributes.normal) g.deleteAttribute('normal');
 }
 
 function disposeTree(root) {
@@ -305,7 +390,7 @@ function mergeStatic() {
     uses.set(o.geometry, (uses.get(o.geometry) || 0) + 1);
     total += o.geometry.attributes.position.count;
   });
-  const keepRepeated = total > (Number(params.get('mergelimit')) || 4000000);
+  const keepRepeated = total > (Number(params.get('mergelimit')) || (mem.DEVICE === 'phone' ? 1000000 : 4000000));
   const keptLines = [];
   const keptMeshes = [];
   const groups = new Map();
@@ -872,6 +957,7 @@ function updateMeta() {
     ['場景', (data.scenes || []).map((s) => s.name).join('、') || '（沒有）'],
     ['載入時間', `${(fileInfo.timing.total / 1000).toFixed(2)} 秒（讀檔 ${(fileInfo.timing.read / 1000).toFixed(2)}、建立 ${(fileInfo.timing.parse / 1000).toFixed(2)}、第一次繪製 ${(fileInfo.timing.firstFrame / 1000).toFixed(2)}）`],
     ['匯出器／瀏覽器', `${data.exporter || '?'} ／ ${APP_VERSION}`],
+    ['裝置／貼圖', `${{ phone: '手機', tablet: '平板', desktop: '電腦' }[mem.DEVICE]}：貼圖最大 ${loadInfo.texCap} px（${loadInfo.resized || 0} 張縮小${loadInfo.skipped ? `、${loadInfo.skipped} 張略過` : ''}），約 ${loadInfo.texMB} MB（原尺寸約 ${loadInfo.texFullMB} MB）`],
   ];
   $('#info-list').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('');
 }
@@ -928,7 +1014,7 @@ window.skpv = {
       if (o.isLine) lineObjs++;
       if (o.geometry && !geos.has(o.geometry)) {
         geos.add(o.geometry);
-        for (const a of Object.values(o.geometry.attributes)) geoBytes += a.array.byteLength;
+        for (const a of Object.values(o.geometry.attributes)) geoBytes += a.array ? a.array.byteLength : a.count * a.itemSize * 4; // UV 上傳後可能已丟掉（手機）
         if (o.geometry.index) geoBytes += o.geometry.index.array.byteLength;
       }
       if (o.material && o.material.map && !texs.has(o.material.map)) {
@@ -960,7 +1046,8 @@ window.skpv = {
   controls,
   get renderer() { return renderer; },
 };
-cloud.init({ loadBuffer, showLoading, hideLoading, fail, toast });
+cloud.init({ loadBuffer, showLoading, hideLoading, fail, toast, loadBegin, showProblem, device: mem.DEVICE, warnMB: mem.WARN_FILE_MB });
+const lastFailed = checkLastLoad();
 setAxes([...axes]);
 if (params.get('axes') != null) setAxes(params.get('axes').split(''));
 $('#cloud-btn').addEventListener('click', () => cloud.showList());

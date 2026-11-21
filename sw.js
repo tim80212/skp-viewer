@@ -1,7 +1,7 @@
 // 離線快取：網頁本身（不含使用者開啟的模型檔，模型檔一律只在本機讀取）
-const CACHE = 'skpv-0.4.1';
+const CACHE = 'skpv-0.5.0';
 const FILES = [
-  './', './index.html', './app.css', './app.js', './cloud.js', './config.js', './manifest.webmanifest',
+  './', './index.html', './app.css', './app.js', './cloud.js', './memory.js', './config.js', './manifest.webmanifest',
   './lib/three.module.min.js', './lib/OrbitControls.js', './lib/GLTFLoader.js', './lib/BufferGeometryUtils.js',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',
 ];

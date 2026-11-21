@@ -126,6 +126,10 @@ dd { margin: 0; word-break: break-all; }
 .mshare.on { color: #2f8132; font-weight: 700; }
 .macts { display: flex; gap: 8px; padding: 0 10px 10px; justify-content: flex-end; }
 #locked .card .btn { margin-right: 8px; }
+#problem .card { border-top: 6px solid #e0a000; }
+#problem.error .card { border-top-color: var(--accent); }
+#problem-text { font-size: 14px; line-height: 1.6; margin-bottom: 12px; }
+#problem-text ul { padding-left: 20px; margin: 6px 0; }
 [hidden] { display: none !important; }
 #bar .btn { flex: 0 0 auto; }
 /* 鎖軸 */
