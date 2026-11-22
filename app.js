@@ -6,8 +6,9 @@ import { GLTFLoader } from './lib/GLTFLoader.js';
 import { mergeGeometries } from './lib/BufferGeometryUtils.js';
 import * as cloud from './cloud.js';
 import * as mem from './memory.js';
+import * as share from './share.js';
 
-const APP_VERSION = '0.5.1';
+const APP_VERSION = '0.6.0';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -57,6 +58,54 @@ let lastPivot = '';
 let loadInfo = {};
 let edgesAutoOff = false;
 
+// ---------- 分享浮水印（v0.6.0）：畫進 WebGL 畫面本身（不是蓋在上面的 HTML），截圖、錄影都會帶到 ----------
+const wm = { on: false, text: '', scene: new THREE.Scene(), cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), mesh: null, tex: null };
+function setWatermark(text) {
+  wm.on = !!text;
+  wm.text = text || '';
+  if (wm.mesh) { wm.scene.remove(wm.mesh); wm.mesh.material.map.dispose(); wm.mesh.material.dispose(); wm.mesh.geometry.dispose(); wm.mesh = null; }
+  if (!text) return;
+  const c = document.createElement('canvas');
+  c.width = 640;
+  c.height = 320;
+  const g = c.getContext('2d');
+  g.translate(c.width / 2, c.height / 2);
+  g.rotate(-Math.PI / 9);
+  g.font = 'bold 30px "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.lineWidth = 3;
+  g.strokeStyle = 'rgba(255,255,255,0.55)';
+  g.fillStyle = 'rgba(30,40,50,0.55)';
+  g.strokeText(text, 0, 0);
+  g.fillText(text, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.32, depthTest: false, depthWrite: false });
+  wm.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  wm.mesh.frustumCulled = false;
+  wm.mesh.position.z = -0.5;
+  wm.scene.add(wm.mesh);
+  wmResize();
+}
+function wmResize() {
+  if (!wm.mesh) return;
+  const w = stage.clientWidth || 1;
+  const h = stage.clientHeight || 1;
+  const tile = Math.max(260, Math.min(420, w * 0.62)); // 手機一行約一個、電腦較密
+  wm.mesh.material.map.repeat.set(w / tile, h / (tile / 2));
+}
+// 每一幀都用這個畫：模型 → 浮水印
+function draw() {
+  renderer.render(scene, camera);
+  if (wm.on && wm.mesh) {
+    renderer.autoClear = false;
+    renderer.render(wm.scene, wm.cam);
+    renderer.autoClear = true;
+  }
+}
+
 // ---------- 畫面大小 ----------
 function resize() {
   const w = stage.clientWidth || 1;
@@ -65,6 +114,7 @@ function resize() {
   perspCam.aspect = w / h;
   perspCam.updateProjectionMatrix();
   updateOrtho();
+  wmResize();
   dirty = true;
 }
 function updateOrtho() {
@@ -172,7 +222,7 @@ canvas.addEventListener('webglcontextlost', (e) => {
   showProblem('畫面被手機關掉了', '顯示卡的記憶體不夠（WebGL context lost），通常是模型或貼圖太大。請重新整理網頁；如果一直發生，請在電腦用「SKP 轉檔上傳」重新上傳較小的版本（壓縮貼圖 1024）。', true);
 }, false);
 
-async function loadBuffer(buf, name, t0) {
+async function loadBuffer(buf, name, t0, opts = {}) {
   const head = new Uint8Array(buf, 0, 4);
   if (String.fromCharCode(...head) !== 'glTF') {
     throw new Error('這不是瀏覽檔（.glb）。請在電腦用「SKP 轉檔上傳」程式把 .skp 轉檔產生。');
@@ -181,6 +231,18 @@ async function loadBuffer(buf, name, t0) {
   showLoading('建立模型…');
   // 依裝置的記憶體預算決定貼圖最大邊長，載入時直接解碼成小尺寸（v0.5）
   const scan = mem.scanGlb(buf);
+  // 分享副本（v0.6.0）：檔案裡寫著代號和到期時間。過期就不顯示（存了檔、換個方式打開也一樣）
+  const shareInfo = ((scan.json.extras || {}).skpViewer || {}).share || null;
+  if (shareInfo) {
+    const exp = Date.parse(shareInfo.expires);
+    if (!exp || exp <= Date.now()) {
+      const err = new Error(`這個分享副本（#${shareInfo.code}）已經過期（${share.fmtDate(shareInfo.expires)}），不能再開啟。`);
+      throw err;
+    }
+    if (opts.share && opts.share.code !== shareInfo.code) throw new Error('分享副本的代號和連結不符，不能開啟。');
+  } else if (opts.share) {
+    throw new Error('這不是分享副本，不能用分享連結開啟。');
+  }
   const maxTex = renderer.capabilities.maxTextureSize;
   const pickCap = mem.chooseCap(scan.images, maxTex);
   const texStats = { count: 0, resized: 0, skipped: 0, skippedList: [], gpuMB: 0, maxDim: 0 };
@@ -203,8 +265,10 @@ async function loadBuffer(buf, name, t0) {
     toast('這個檔案是較新版的「SKP 轉檔上傳」產生的，部分功能可能無法顯示，請重新打開網頁取得新版。', 5000);
   }
   setModel(gltf.scene, extras);
-  fileInfo = { name, bytes: buf.byteLength };
-  renderer.render(scene, camera); // 第一次繪製（含著色器編譯、貼圖上傳），同步完成
+  fileInfo = { name, bytes: buf.byteLength, share: shareInfo };
+  const d = new Date();
+  setWatermark(shareInfo ? `#${shareInfo.code}・僅供檢視・${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : '');
+  draw(); // 第一次繪製（含著色器編譯、貼圖上傳），同步完成
   renderer.getContext().finish();
   const tFirst = performance.now();
   fileInfo.timing = { read: tRead - t0, parse: tParse - tRead, firstFrame: tFirst - tParse, total: tFirst - t0 };
@@ -920,7 +984,7 @@ function loop(now) {
   if (controls.update()) dirty = true;
   if (!dirty) return;
   dirty = false;
-  renderer.render(scene, camera);
+  draw();
   drawOverlay();
 }
 requestAnimationFrame(loop);
@@ -954,6 +1018,7 @@ function updateMeta() {
     ['場景', (data.scenes || []).map((s) => s.name).join('、') || '（沒有）'],
     ['載入時間', `${(fileInfo.timing.total / 1000).toFixed(2)} 秒（讀檔 ${(fileInfo.timing.read / 1000).toFixed(2)}、建立 ${(fileInfo.timing.parse / 1000).toFixed(2)}、第一次繪製 ${(fileInfo.timing.firstFrame / 1000).toFixed(2)}）`],
     ['匯出器／瀏覽器', `${data.exporter || '?'} ／ ${APP_VERSION}`],
+    ...(fileInfo.share ? [['分享', `#${fileInfo.share.code}，有效到 ${share.fmtDate(fileInfo.share.expires)}（僅供檢視）`]] : []),
     ['裝置／貼圖', `${{ phone: '手機', tablet: '平板', desktop: '電腦' }[mem.DEVICE]}：貼圖最大 ${loadInfo.texCap} px（${loadInfo.resized || 0} 張縮小${loadInfo.skipped ? `、${loadInfo.skipped} 張略過` : ''}），約 ${loadInfo.texMB} MB（原尺寸約 ${loadInfo.texFullMB} MB）`],
   ];
   $('#info-list').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('');
@@ -980,7 +1045,20 @@ window.skpv = {
   screenOfSU(mm) { return toScreen(new THREE.Vector3(mm[0] / 1000, mm[2] / 1000, -mm[1] / 1000)); },
   get last() { return window.__skpvLastMeasure; },
   get timing() { return window.__skpvTiming; },
-  render() { renderer.render(scene, camera); drawOverlay(); },
+  render() { draw(); drawOverlay(); },
+  // 測試用：浮水印的文字，和「有浮水印／沒浮水印」各畫一次相差幾個像素（不會把浮水印關掉）
+  wmProbe() {
+    const gl = renderer.getContext();
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    const read = () => { const px = new Uint8Array(w * h * 4); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); return px; };
+    renderer.render(scene, camera);
+    const a = read();
+    draw();
+    const b = read();
+    let diff = 0;
+    for (let i = 0; i < a.length; i += 4) if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 12) diff++;
+    return { on: wm.on, text: wm.text, diffRatio: +(diff / (w * h)).toFixed(4) };
+  },
   // 測試用：目前相機狀態（公尺）
   camInfo() {
     const r = (v) => v.toArray().map((x) => +x.toFixed(2));
@@ -1049,7 +1127,9 @@ setAxes([...axes]);
 if (params.get('axes') != null) setAxes(params.get('axes').split(''));
 $('#cloud-btn').addEventListener('click', () => cloud.showList());
 $('#welcome-cloud').addEventListener('click', () => cloud.showList());
-const first = params.get('m') ? cloud.openCloud(params.get('m')) : params.get('src') ? openUrl(params.get('src')) : null;
+const shareUi = { loadBuffer, showLoading, hideLoading, toast, loadBegin, showProblem, device: mem.DEVICE };
+const first = share.isShareLink() ? share.openShare(shareUi).catch(fail)
+  : params.get('m') ? cloud.openCloud(params.get('m')) : params.get('src') ? openUrl(params.get('src')) : null;
 if (first) {
   first.then(() => {
     if (!model) return;

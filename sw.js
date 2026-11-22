@@ -1,7 +1,7 @@
-// 離線快取：網頁本身（不含使用者開啟的模型檔，模型檔一律只在本機讀取）
-const CACHE = 'skpv-0.5.1';
+// 離線快取：只有網頁本身（同網域的程式、圖示）。模型檔、Google、紀錄端點一律不經過這裡、不快取（v0.6.0：分享的模型不留在對方手機）
+const CACHE = 'skpv-0.6.0';
 const FILES = [
-  './', './index.html', './app.css', './app.js', './cloud.js', './memory.js', './config.js', './manifest.webmanifest',
+  './', './index.html', './app.css', './app.js', './cloud.js', './share.js', './notice.js', './memory.js', './config.js', './manifest.webmanifest',
   './lib/three.module.min.js', './lib/OrbitControls.js', './lib/GLTFLoader.js', './lib/BufferGeometryUtils.js',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',
 ];
@@ -20,7 +20,8 @@ self.addEventListener('fetch', (e) => {
     try {
       const res = await fetch(e.request, { cache: 'no-cache' });
       const rel = './' + url.pathname.split('/').pop();
-      if (res.ok && (FILES.includes(rel) || url.pathname.includes('/lib/') || url.pathname.includes('/icons/'))) c.put(e.request, res.clone());
+      // 快取的鍵去掉 ?… 和 #…：分享連結的權杖（?s=…）不會留在快取裡
+      if (res.ok && (FILES.includes(rel) || url.pathname.includes('/lib/') || url.pathname.includes('/icons/'))) c.put(url.origin + url.pathname, res.clone());
       return res;
     } catch (err) {
       const hit = await c.match(e.request, { ignoreSearch: true });

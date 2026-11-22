@@ -59,7 +59,7 @@
       <ol class="small">
         <li>在電腦用「SKP 轉檔上傳」程式選 .skp，會自動轉檔並存到你的 Google Drive。</li>
         <li>手機打開這個網頁、登入同一個 Google 帳號，就能看到全部模型。</li>
-        <li>要給業主看：在清單按「分享連結」，傳到 LINE，對方不用登入就能看那一個模型。</li>
+        <li>要給業主、廠商看：在電腦的「SKP 轉檔上傳」按「新增分享」，每個人一條專屬連結（有期限、有開啟紀錄），對方不用登入。</li>
       </ol>
       <p class="small">模型直接從 Google Drive 下載到這台裝置，不經過其他伺服器。</p>
       <p class="small" id="offline-state"></p>
@@ -95,6 +95,13 @@
       <p id="locked-text"></p>
       <button class="btn primary big" id="locked-login">用 Google 登入</button>
       <button class="btn" id="locked-close">關閉</button>
+    </div>
+  </section>
+
+  <section id="notice" class="sheet" hidden>
+    <div class="card">
+      <div id="notice-text"></div>
+      <div class="notice-btns"><button class="btn big" id="notice-no">不同意</button><button class="btn primary big" id="notice-yes">我同意並開啟</button></div>
     </div>
   </section>
 

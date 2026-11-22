@@ -99,6 +99,7 @@ async function api(path, { method = 'GET', query = {}, body, raw = false, useKey
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const res = await fetch(`${DRIVE()}${path}${q.toString() ? '?' + q : ''}`, {
     method, headers, body: body !== undefined ? JSON.stringify(body) : undefined,
+    cache: 'no-store', // v0.6.0：模型和清單都不進瀏覽器快取
   });
   if (res.status === 401 && !useKey) { auth = null; store(null); }
   if (!res.ok) {
@@ -274,9 +275,9 @@ function renderList() {
     return `<div class="mitem${f.id === currentId ? ' current' : ''}" data-id="${esc(f.id)}">
       <button class="mopen" data-act="open"><span class="mthumb">${thumb}</span>
         <span class="mtext"><b>${esc(name)}</b><span class="small">${when} · ${mb(Number(f.size || 0))}${f.appProperties && f.appProperties.scenes ? ` · ${esc(f.appProperties.scenes)} 個場景` : ''}</span>
-        <span class="mshare ${shared ? 'on' : ''}">${shared ? '有連結就能看' : '只有我'}${f.appProperties && f.appProperties.mobile ? ' · 有手機版' : ''}</span></span></button>
-      <div class="macts"><button class="btn" data-act="share">${shared ? '複製分享連結' : '分享連結'}</button>
-        ${shared ? '<button class="btn" data-act="unshare">取消分享</button>' : ''}</div></div>`;
+        <span class="mshare ${shared ? 'on' : ''}">${shared ? '舊式公開分享中（原檔，沒有期限）' : '只有我'}${f.appProperties && f.appProperties.mobile ? ' · 有手機版' : ''}</span></span></button>
+      <div class="macts">${shared ? '<button class="btn" data-act="share">複製舊式連結</button><button class="btn" data-act="unshare">取消舊式分享</button>'
+        : '<span class="small">分享：用電腦的「SKP 轉檔上傳」新增（每人一條）</span>'}</div></div>`;
   }).join('');
 }
 
@@ -291,16 +292,11 @@ function shareUrl(id) {
 async function shareFile(id) {
   const f = files.find((x) => x.id === id);
   if (f && !(f.permissionIds || []).includes('anyoneWithLink')) {
-    if (!confirm(`分享「${f.name.replace(/\.glb$/i, '')}」？\n有連結的人不用登入就能看這個模型（看不到你其他的模型）。`)) return;
-    await api(`/files/${encodeURIComponent(id)}/permissions`, { method: 'POST', body: { role: 'reader', type: 'anyone', allowFileDiscovery: false } });
-    f.permissionIds = [...(f.permissionIds || []), 'anyoneWithLink'];
-    renderList();
+    // v0.6.0 起網頁不再公開原檔；分享一律用桌面程式「新增分享」（每人一份副本、有期限和開啟紀錄）
+    ui.toast('分享請用電腦的「SKP 轉檔上傳」→「新增分享」（每人一條連結）', 4000);
+    return;
   }
-  // 手機版也要分享，手機開分享連結時才拿得到（v0.5）
-  const mob = f && f.appProperties && f.appProperties.mobile;
-  if (mob) {
-    try { await api(`/files/${encodeURIComponent(mob)}/permissions`, { method: 'POST', body: { role: 'reader', type: 'anyone', allowFileDiscovery: false } }); } catch (e) { /* 略過 */ }
-  }
+  // 以下只給 v0.5 以前已經公開的舊式分享：複製原本的連結
   const url = shareUrl(id);
   const title = f ? f.name.replace(/\.glb$/i, '') : 'SKP 模型';
   if (navigator.share && matchMedia('(pointer: coarse)').matches) {

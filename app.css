@@ -173,3 +173,14 @@ dd { margin: 0; word-break: break-all; }
   .tool { flex-basis: 52px !important; }
   .tool .ic { font-size: 18px; height: 20px; }
 }
+
+/* 分享聲明（v0.6.0） */
+#notice .card { max-width: 640px; max-height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 6px solid #1f6feb; }
+#notice-text { font-size: 14px; line-height: 1.65; }
+#notice-text h2 { font-size: 18px; margin: 0 0 8px; }
+#notice-text ol { padding-left: 22px; margin: 8px 0; }
+#notice-text ol > li { margin-bottom: 6px; }
+#notice-text ul { padding-left: 18px; margin: 4px 0; }
+#notice-text p { margin: 6px 0; }
+.notice-btns { position: sticky; bottom: -18px; display: flex; gap: 10px; justify-content: flex-end; padding: 12px 0 4px; background: var(--card, #fff); }
+.notice-btns .btn { flex: 1 1 0; max-width: 220px; }
