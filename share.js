@@ -33,14 +33,14 @@ const STATUS_TEXT = {
   revoked: ['這條分享連結已被取消', '分享的人已經取消這條連結，模型不會再顯示。'],
   unknown: ['找不到這條分享連結', '可能已經刪除，或網址不完整（請確認整段網址都有複製到）。'],
   busy: ['開啟次數太頻繁', '這條連結短時間內開啟太多次，請過幾分鐘再試。'],
-  offline: ['需要網路才能開啟', '分享的模型每次開啟都要先上網確認連結還有效，沒有網路時不會顯示。請連上網路後重新整理。'],
+  offline: ['沒辦法確認這條連結', '分享的模型每次開啟都要先上網確認連結還有效，沒有網路時不會顯示。請連上網路後重新整理。<br>如果網路正常還是這樣，可能是連結網址不完整，或分享的人已經停用這條連結，請聯絡分享給你的人。'],
   bad: ['連結不完整', '這條分享連結少了一部分，請確認整段網址都有複製到。'],
 };
 
 function problem(ui, key, extra = '') {
   const [t, d] = STATUS_TEXT[key] || STATUS_TEXT.unknown;
   ui.hideLoading();
-  ui.showProblem(t, esc(d) + extra, key !== 'expired' && key !== 'revoked');
+  ui.showProblem(t, esc(d).replace(/&lt;br&gt;/g, '<br>') + extra, key !== 'expired' && key !== 'revoked');
   document.body.dataset.share = key; // 測試用
 }
 
