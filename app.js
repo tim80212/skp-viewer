@@ -7,7 +7,7 @@ import { mergeGeometries } from './lib/BufferGeometryUtils.js';
 import * as cloud from './cloud.js';
 import * as mem from './memory.js';
 
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.5.1';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -769,13 +769,10 @@ function showDistance(a, b, extra = '') {
   const comp = { x: Math.abs(pb.x - pa.x), y: Math.abs(pb.y - pa.y), z: Math.abs(pb.z - pa.z) };
   const r = $('#readout');
   r.hidden = false;
-  const tag = locked ? `<span class="axtag">${axesName()}</span>` : '';
-  const sub = AXIS_ORDER.map((k) => {
-    const cls = locked && !axes.has(k) ? 'off' : '';
-    return `<span class="ax ${cls}" style="color:${AXES[k].css}">${AXES[k].label} ${fmt(comp[k])}</span>`;
-  }).join('　');
-  r.innerHTML = `<div class="big">${tag}${fmt(d)} mm</div><div class="sub">${sub}</div>` +
-    `<div class="snap">${extra || `${SNAP_NAME[a.type]} → ${SNAP_NAME[b.type]}${locked ? `　真實 ${fmt(real)}` : ''}`}</div>`;
+  // v0.5.1：只顯示數字（使用者要求：分量、吸附類型拿掉，畫面留給模型）。鎖軸時前面加一個小小的軸名。
+  const tag = locked ? `<span class="axtag" style="color:${AXES[[...axes][0]].css}">${axesName()}</span>` : '';
+  r.innerHTML = `<div class="big">${tag}${fmt(d)} mm</div>`;
+  void extra;
   window.__skpvLastMeasure = { mm: d, real, axes: locked ? AXIS_ORDER.filter((k) => axes.has(k)).join('') : 'xyz', a: pa, b: pb, comp, types: [a.type, b.type] };
   return d;
 }

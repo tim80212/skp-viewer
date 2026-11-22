@@ -12,7 +12,7 @@
   --safe-l: env(safe-area-inset-left, 0px);
   --safe-r: env(safe-area-inset-right, 0px);
   --bar-h: 48px;
-  --tools-h: 60px;
+  --tools-h: 42px;  /* v0.5.1：60 → 42（圖示和文字排成一列），手機看圖的畫面多一點 */
   --scenes-h: 52px;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -52,7 +52,7 @@ button { font: inherit; color: inherit; }
 .label { position: absolute; transform: translate(-50%, -130%); background: var(--accent); color: #fff; font-weight: 700;
   font-size: 15px; padding: 3px 8px; border-radius: 6px; white-space: nowrap; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
 #readout { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 20px);
-  background: var(--panel); border-radius: 12px; padding: 8px 14px; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+  background: var(--panel); border-radius: 10px; padding: 4px 12px; box-shadow: 0 2px 10px rgba(0,0,0,.18);
   text-align: center; pointer-events: auto; }
 #readout .big { font-size: 24px; font-weight: 700; color: var(--accent); white-space: nowrap; }
 .mlines { position: absolute; inset: 0; overflow: visible; filter: drop-shadow(0 0 1px #fff); }
@@ -62,11 +62,11 @@ button { font: inherit; color: inherit; }
   font-size: 13px; padding: 6px 12px; border-radius: 16px; white-space: nowrap; pointer-events: none; }
 
 /* ---------- 場景 ---------- */
-#scenes { grid-area: scenes; display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 8px calc(10px + var(--safe-r)) 8px calc(10px + var(--safe-l));
+#scenes { grid-area: scenes; display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden; padding: 5px calc(10px + var(--safe-r)) 8px calc(10px + var(--safe-l));
   background: #f5f7fa; border-top: 1px solid var(--line); scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 #scenes::-webkit-scrollbar { display: none; }
 #scenes:empty { display: none; }
-.scene { flex: 0 0 auto; min-height: 36px; padding: 0 14px; border-radius: 18px; border: 1px solid var(--line); background: #fff;
+.scene { flex: 0 0 auto; min-height: 30px; padding: 0 12px; border-radius: 18px; border: 1px solid var(--line); background: #fff;
   font-size: 14px; cursor: pointer; white-space: nowrap; }
 .scene.active { background: var(--bar); color: #fff; border-color: var(--bar); }
 .scene.current { font-style: italic; color: var(--muted); }
@@ -75,9 +75,9 @@ button { font: inherit; color: inherit; }
 /* ---------- 工具列 ---------- */
 #tools { grid-area: tools; display: flex; justify-content: space-around; align-items: stretch; background: #fff; border-top: 1px solid var(--line);
   padding: 0 var(--safe-r) var(--safe-b) var(--safe-l); }
-.tool { flex: 1; max-width: 110px; border: 0; background: none; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 2px; font-size: 12px; color: var(--muted); cursor: pointer; padding: 4px 0; }
-.tool .ic { font-size: 20px; line-height: 1; height: 24px; display: flex; align-items: center; }
+.tool { flex: 1; max-width: 110px; border: 0; background: none; display: flex; flex-direction: row; align-items: center; justify-content: center;
+  gap: 4px; font-size: 13px; color: var(--muted); cursor: pointer; padding: 0; white-space: nowrap; }
+.tool .ic { font-size: 16px; line-height: 1; height: 18px; display: flex; align-items: center; }
 .tool.active { color: var(--primary); font-weight: 700; }
 .tool.active .ic { transform: scale(1.1); }
 .tool.toggle:not(.on) { opacity: .45; }
@@ -134,18 +134,18 @@ dd { margin: 0; word-break: break-all; }
 #bar .btn { flex: 0 0 auto; }
 /* 鎖軸 */
 #axes { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); display: flex; align-items: center; gap: 6px;
-  background: var(--panel); border-radius: 24px; padding: 5px 8px; box-shadow: 0 2px 10px rgba(0,0,0,.18); white-space: nowrap; z-index: 2; }
+  background: var(--panel); border-radius: 20px; padding: 3px 6px; box-shadow: 0 2px 10px rgba(0,0,0,.18); white-space: nowrap; z-index: 2; }
 #axes .small { color: var(--muted); font-size: 12px; padding: 0 2px; }
 #axes-state { min-width: 5.5em; }
-.axis { --ax: #888; display: inline-flex; align-items: center; gap: 6px; min-height: 40px; min-width: 64px; padding: 0 10px; border-radius: 20px;
+.axis { --ax: #888; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; min-width: 60px; padding: 0 10px; border-radius: 16px;
   border: 2px solid var(--line); background: #fff; font-size: 14px; font-weight: 600; cursor: pointer; color: var(--muted); }
 .axis[data-axis=x] { --ax: #d62d2d; }
 .axis[data-axis=y] { --ax: #229a3c; }
 .axis[data-axis=z] { --ax: #2563d6; }
-.axis i { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--ax); display: inline-block; position: relative; background: #fff; }
+.axis i { width: 15px; height: 15px; border-radius: 50%; border: 2px solid var(--ax); display: inline-block; position: relative; background: #fff; }
 .axis.on { border-color: var(--ax); color: var(--ax); background: #fff; box-shadow: inset 0 0 0 40px rgba(0,0,0,.03); }
-.axis.on i::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--ax); }
-.axes-on #hint { bottom: 66px; }
+.axis.on i::after { content: ''; position: absolute; inset: 2px; border-radius: 50%; background: var(--ax); }
+.axes-on #hint { bottom: 54px; }
 #readout .axtag { font-size: 13px; font-weight: 700; color: var(--fg); background: #eef1f4; border-radius: 6px; padding: 1px 6px; margin-right: 6px; vertical-align: middle; }
 #readout .ax { font-weight: 600; }
 #readout .ax.off { opacity: .35; font-weight: 400; }
@@ -163,7 +163,8 @@ dd { margin: 0; word-break: break-all; }
   #scenes:empty { display: flex; }
   .scene { white-space: normal; text-align: left; border-radius: 10px; padding: 8px 12px; }
   #tools { flex-direction: column; border-top: 0; border-left: 1px solid var(--line); padding: 8px var(--safe-r) var(--safe-b) 0; justify-content: flex-start; gap: 4px; }
-  .tool { flex: 0 0 64px; max-width: none; }
+  .tool { flex: 0 0 64px; max-width: none; flex-direction: column; gap: 2px; font-size: 12px; }
+  .tool .ic { font-size: 20px; height: 24px; }
 }
 /* 手機橫向（高度很矮）：上方列變窄 */
 @media (orientation: landscape) and (max-height: 500px) {
