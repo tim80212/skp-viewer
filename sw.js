@@ -1,5 +1,5 @@
 // 離線快取：只有網頁本身（同網域的程式、圖示；pdf.js 用到時才快取）。模型檔、PDF、Google、紀錄端點一律不經過這裡、不快取（v0.6.0：分享的檔案不留在對方手機）
-const CACHE = 'skpv-0.8.0';
+const CACHE = 'skpv-0.8.1';
 const FILES = [
   './', './index.html', './app.css', './app.js', './cloud.js', './share.js', './notice.js', './pdfview.js', './memory.js', './config.js', './manifest.webmanifest',
   './lib/three.module.min.js', './lib/OrbitControls.js', './lib/GLTFLoader.js', './lib/BufferGeometryUtils.js',
