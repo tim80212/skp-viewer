@@ -9,7 +9,7 @@ import * as mem from './memory.js';
 import * as share from './share.js';
 import * as pdfv from './pdfview.js';
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.7.1';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');

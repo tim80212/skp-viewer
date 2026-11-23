@@ -7,6 +7,9 @@
 // - 底圖的像素有上限（手機 300 萬）；放大時底圖用 CSS 放大（手勢很順），停下來後只把「看得到的那一塊」用高解析度補畫。
 // - 縮圖列：看到的才畫、一次一張、主畫面在畫的時候先等。
 // - 分享：浮水印「#代號・僅供檢視・日期」畫進每一頁的 canvas（不是蓋在上面的 HTML）。
+// v0.7.1：桌面程式在 PDF 裡放了每頁的預覽圖（WebP，長邊 1600 px）和縮圖，檔頭 `%SKPV-PREVIEW 位置 長度` 指到索引。
+//   有預覽：先秀預覽（瀏覽器原生解圖、在背景執行緒，很快），pdf.js 同時在背景開檔；預覽夠清楚就不用 pdf.js 畫，
+//   不夠清楚（電腦高解析度螢幕）才在背景畫清晰版換上去；放大時照舊只補畫看得到的區域。縮圖列直接用縮圖，不用 pdf.js。
 import { DEVICE } from './memory.js';
 
 const $ = (s) => document.querySelector(s);
@@ -25,7 +28,9 @@ const S = {
   bases: new Map(), // 頁碼 → { canvas, scale }
   detail: null, detailTimer: 0, rendering: 0, wm: '', name: '', bytes: 0, fetched: 0, requests: 0,
   open: false, token: 0, mode: '', timing: {}, thumbObs: null, thumbQ: [], thumbBusy: 0, gesture: false,
+  pv: null, pvCache: new Map(), pvFail: false, head: null, get: null, docReady: null, stats: { previews: 0, sharp: 0, detail: 0 },
 };
+const PV_TAG = '%SKPV-PREVIEW ';
 
 async function lib() {
   if (!pdfjs) {
@@ -46,24 +51,32 @@ export function isPdf(buf) {
 export async function openPdf(src, { name = '', share = null, t0 = performance.now(), hooks } = {}) {
   ui = hooks || ui;
   const lib0 = performance.now();
-  const P = await lib();
+  const libP = lib(); // v0.7.1：pdf.js（約 1.8 MB）跟第一段資料同時下載；有預覽的話不用等它就能先顯示
+  libP.then(() => { S.timing.lib = +(performance.now() - lib0).toFixed(0); }).catch(() => {});
   close();
   const token = ++S.token;
   S.name = name;
   S.fetched = 0;
   S.requests = 0;
+  S.pv = null;
+  S.pvFail = false;
+  S.head = null;
+  S.timing = {};
+  S.stats = { previews: 0, sharp: 0, detail: 0 };
+  S.docReady = null;
   const common = {
     cMapUrl: new URL('./lib/pdfjs/cmaps/', import.meta.url).href, cMapPacked: true,
     standardFontDataUrl: new URL('./lib/pdfjs/standard_fonts/', import.meta.url).href,
     isEvalSupported: false, enableXfa: false, maxImageSize: CAPS.maxImage, disableFontFace: false,
     useSystemFonts: true, stopAtErrors: false,
   };
-  let params;
+  let makeParams;
   if (src.data) {
     S.mode = 'data';
     S.bytes = src.data.byteLength;
     S.fetched = S.bytes;
-    params = { ...common, data: new Uint8Array(src.data) };
+    S.get = (off, len) => Promise.resolve(src.data.slice(off, off + len));
+    makeParams = () => ({ ...common, data: new Uint8Array(src.data.slice(0)) });
   } else {
     S.bytes = src.size;
     const first = await src.fetchRange(0, Math.min(src.size, FIRST_CHUNK));
@@ -71,40 +84,73 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     if (first.full) { // 伺服器不支援 Range：整個檔案已經下載了
       S.mode = 'full';
       S.fetched = first.full.byteLength;
-      params = { ...common, data: new Uint8Array(first.full) };
+      S.head = first.full;
+      S.get = (off, len) => Promise.resolve(first.full.slice(off, off + len));
+      makeParams = () => ({ ...common, data: new Uint8Array(first.full.slice(0)) });
     } else {
       S.mode = 'range';
       S.fetched = first.byteLength;
       S.requests = 1;
       if (!isPdf(first)) throw new Error('這不是 PDF 檔。');
-      const tr = new P.PDFDataRangeTransport(src.size, new Uint8Array(first));
-      tr.requestDataRange = (begin, end) => {
+      S.head = first;
+      S.get = async (off, len) => { // 預覽、縮圖：第一段裡有的直接拿，沒有的自己抓（不經過 pdf.js）
+        if (off + len <= first.byteLength) return first.slice(off, off + len);
         S.requests++;
-        src.fetchRange(begin, end).then((buf) => {
-          S.fetched += buf.byteLength;
-          tr.onDataRange(begin, new Uint8Array(buf));
-          progress();
-        }).catch((e) => { S.rangeError = e; ui && ui.toast && ui.toast('下載 PDF 時網路中斷，請重新整理再試一次', 5000); });
+        const b = await src.fetchRange(off, off + len);
+        S.fetched += b.byteLength;
+        return b;
       };
-      params = { ...common, range: tr, length: src.size, rangeChunkSize: RANGE_CHUNK, disableAutoFetch: true, disableStream: true };
+      makeParams = (P) => {
+        const tr = new P.PDFDataRangeTransport(src.size, new Uint8Array(first.slice(0)));
+        tr.requestDataRange = (begin, end) => {
+          S.requests++;
+          src.fetchRange(begin, end).then((buf) => {
+            S.fetched += buf.byteLength;
+            tr.onDataRange(begin, new Uint8Array(buf));
+            progress();
+          }).catch((e) => { S.rangeError = e; ui && ui.toast && ui.toast('下載 PDF 時網路中斷，請重新整理再試一次', 5000); });
+        };
+        return { ...common, range: tr, length: src.size, rangeChunkSize: RANGE_CHUNK, disableAutoFetch: true, disableStream: true };
+      };
     }
   }
-  S.task = P.getDocument(params);
-  const doc = await S.task.promise;
-  if (token !== S.token) { doc.destroy(); return null; }
-  S.doc = doc;
-  S.n = doc.numPages;
-  // 分享副本（第 2 層）：檔案裡寫著代號和到期時間，過期就不顯示（存了檔、換個方式打開也一樣）
-  let info = {};
-  try { info = ((await doc.getMetadata()).info || {}).Custom || {}; } catch (e) { /* 沒有就算了 */ }
-  const shareInfo = info.SKPVCode ? { code: String(info.SKPVCode), expires: String(info.SKPVExpires || '') } : null;
-  if (shareInfo) {
-    const exp = Date.parse(shareInfo.expires);
-    if (!exp || exp <= Date.now()) { close(); throw new Error(`這個分享副本（#${shareInfo.code}）已經過期，不能再開啟。`); }
-    if (share && share.code !== shareInfo.code) { close(); throw new Error('分享副本的代號和連結不符，不能開啟。'); }
-  } else if (share) {
-    close();
-    throw new Error('這不是分享副本，不能用分享連結開啟。');
+  const startDoc = async () => {
+    const P = await libP;
+    if (token !== S.token) throw new Error('canceled');
+    S.task = P.getDocument(makeParams(P));
+    return S.task.promise;
+  };
+  // v0.7.1：先看檔案裡有沒有預覽（有的話不用等 pdf.js 開檔就能先顯示）
+  const firstBuf = src.data || S.head;
+  try { S.pv = await readIndex(firstBuf); } catch (e) { S.pv = null; }
+  if (token !== S.token) return null;
+  let shareInfo = null;
+  if (S.pv) {
+    shareInfo = S.pv.share || null;
+    checkShare(shareInfo, share);
+    S.n = S.pv.pages.length;
+    S.pv.pages.forEach((p, i) => S.sizes.set(i + 1, { w: p[8], h: p[9] }));
+    S.docReady = startDoc().then(async (doc) => {
+      if (token !== S.token) { doc.destroy(); return null; }
+      S.doc = doc;
+      S.timing.docReady = +(performance.now() - t0).toFixed(0);
+      const inf = await shareFromInfo(doc);
+      if ((inf && inf.code) !== (shareInfo && shareInfo.code)) { // 預覽索引和文件資訊不一致：當成不是分享副本
+        close();
+        if (ui && ui.showProblem) ui.showProblem('文件開不起來', '這個檔案的分享資訊不一致，不能開啟。', true);
+        return null;
+      }
+      return doc;
+    });
+    S.docReady.catch(() => { if (token === S.token && ui && ui.toast) ui.toast('PDF 開不起來（預覽可以看，放大時沒辦法補清楚）', 5000); });
+  } else {
+    const doc = await startDoc();
+    if (token !== S.token) { doc.destroy(); return null; }
+    S.doc = doc;
+    S.docReady = Promise.resolve(doc);
+    S.n = doc.numPages;
+    shareInfo = await shareFromInfo(doc);
+    checkShare(shareInfo, share);
   }
   const d = new Date();
   S.wm = shareInfo ? `#${shareInfo.code}・僅供檢視・${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : '';
@@ -115,12 +161,65 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.zoom = 1;
   $('#pdf-count').textContent = S.n;
   buildThumbs();
-  S.timing = { lib: lib0 ? +(performance.now() - lib0).toFixed(0) : 0, open: +(performance.now() - t0).toFixed(0) };
+  S.timing = { ...S.timing, open: +(performance.now() - t0).toFixed(0), preview: !!S.pv };
   await go(1, true);
   S.timing.firstPage = +(performance.now() - t0).toFixed(0);
   S.timing.bytesAtFirstPage = S.fetched;
   window.__skpvPdfTiming = S.timing;
-  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes };
+  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv };
+}
+
+// 分享副本（第 2 層）：檔案裡寫著代號和到期時間，過期就不顯示（存了檔、換個方式打開也一樣）
+function checkShare(info, share) {
+  if (info) {
+    const exp = Date.parse(info.expires);
+    if (!exp || exp <= Date.now()) { close(); throw new Error(`這個分享副本（#${info.code}）已經過期，不能再開啟。`); }
+    if (share && share.code !== info.code) { close(); throw new Error('分享副本的代號和連結不符，不能開啟。'); }
+  } else if (share) {
+    close();
+    throw new Error('這不是分享副本，不能用分享連結開啟。');
+  }
+}
+async function shareFromInfo(doc) {
+  let info = {};
+  try { info = ((await doc.getMetadata()).info || {}).Custom || {}; } catch (e) { /* 沒有就算了 */ }
+  return info.SKPVCode ? { code: String(info.SKPVCode), expires: String(info.SKPVExpires || '') } : null;
+}
+
+// ---------------------------------------------------------------- 預覽（v0.7.1）
+async function readIndex(buf) {
+  if (!buf) return null;
+  const head = new TextDecoder('latin1').decode(new Uint8Array(buf, 0, Math.min(4096, buf.byteLength)));
+  const i = head.indexOf(PV_TAG);
+  if (i < 0) return null;
+  const m = /^%SKPV-PREVIEW (\d{12}) (\d{12})/.exec(head.slice(i));
+  if (!m) return null;
+  const js = JSON.parse(new TextDecoder().decode(await S.get(Number(m[1]), Number(m[2]))));
+  if (!js || js.v !== 1 || !Array.isArray(js.pages) || !js.pages.length) return null;
+  return js;
+}
+function previewBitmap(n) {
+  if (S.pvCache.has(n)) return S.pvCache.get(n);
+  const p = S.pv.pages[n - 1];
+  const pr = S.get(p[0], p[1]).then((buf) => createImageBitmap(new Blob([buf], { type: `image/${S.pv.fmt || 'webp'}` })));
+  S.pvCache.set(n, pr);
+  for (const k of [...S.pvCache.keys()]) { // 只留附近幾頁
+    if (Math.abs(k - n) > 2) { S.pvCache.get(k).then((b) => b.close && b.close()).catch(() => {}); S.pvCache.delete(k); }
+  }
+  pr.catch(() => S.pvCache.delete(n));
+  return pr;
+}
+async function previewCanvas(n) {
+  const bm = await previewBitmap(n);
+  const c = document.createElement('canvas');
+  c.className = 'pdf-base';
+  c.width = bm.width;
+  c.height = bm.height;
+  const ctx = c.getContext('2d', { alpha: false });
+  ctx.drawImage(bm, 0, 0);
+  if (S.wm) watermark(ctx, bm.width, bm.height, 0, 0, c.width, c.height);
+  S.stats.previews++;
+  return c;
 }
 
 export function close() {
@@ -138,10 +237,13 @@ export function close() {
   if (S.doc) { S.doc.destroy(); S.doc = null; }
   else if (S.task) S.task.destroy();
   S.task = null;
+  for (const pr of S.pvCache.values()) pr.then((b) => b.close && b.close()).catch(() => {});
+  S.pvCache.clear();
 }
 
 export function info() {
-  return { name: S.name, pages: S.n, bytes: S.bytes, mode: S.mode, fetched: S.fetched, requests: S.requests, share: S.share, timing: S.timing };
+  return { name: S.name, pages: S.n, bytes: S.bytes, mode: S.mode, fetched: S.fetched, requests: S.requests, share: S.share, timing: S.timing,
+    preview: !!S.pv && !S.pvFail, stats: { ...S.stats }, docReady: !!S.doc };
 }
 
 function freeCanvas(c) { if (c) { c.width = 0; c.height = 0; c.remove(); } }
@@ -155,6 +257,7 @@ function progress() {
 // ---------------------------------------------------------------- 尺寸、版面
 async function pageSize(n) {
   if (!S.sizes.has(n)) {
+    await S.docReady;
     const p = await S.doc.getPage(n);
     const v = p.getViewport({ scale: 1 });
     S.sizes.set(n, { w: v.width, h: v.height });
@@ -196,7 +299,7 @@ function layout() {
 
 // ---------------------------------------------------------------- 換頁、繪製
 export async function go(n, first = false) {
-  if (!S.doc) return;
+  if (!S.open && !first) return;
   n = Math.max(1, Math.min(S.n, Math.round(n) || 1));
   const token = S.token;
   const t0 = performance.now();
@@ -218,11 +321,12 @@ export async function go(n, first = false) {
   }
   layout();
   markThumb();
-  if (!have) await renderBase(n);
+  if (!have) await showBase(n);
   if (token !== S.token || S.cur !== n) return;
   const b = S.bases.get(n);
   if (b && b.canvas.parentNode !== pg) { pg.innerHTML = ''; pg.appendChild(b.canvas); }
   pg.classList.remove('blank');
+  sharpen(n);
   S.timing.lastFlip = +(performance.now() - t0).toFixed(0);
   document.body.dataset.pdfPage = String(n);
   // 前後一頁先畫好；其他頁的畫布、pdf.js 的頁面資源放掉
@@ -233,7 +337,11 @@ export async function go(n, first = false) {
     for (const k of [n + 1, n - 1]) {
       if (token !== S.token || S.cur !== n) return;
       // 前後頁先畫好底圖，畫完馬上放掉它解開的影像（畫布留著；翻過去要放大時才重新解）→ 記憶體只留目前這頁的影像
-      if (k >= 1 && k <= S.n && !S.bases.has(k)) { await pageSize(k); await renderBase(k); if (S.cur !== k) releasePage(k); }
+      if (k >= 1 && k <= S.n && !S.bases.has(k)) {
+        await pageSize(k);
+        await showBase(k);
+        if (S.bases.get(k) && !S.bases.get(k).preview && S.cur !== k) releasePage(k);
+      }
     }
     pumpThumbs();
   });
@@ -242,10 +350,52 @@ export async function go(n, first = false) {
 function idle(fn) { (window.requestIdleCallback || ((f) => setTimeout(f, 60)))(() => fn()); }
 
 async function releasePage(n) {
+  if (!S.doc) return;
   try { const p = await S.doc.getPage(n); p.cleanup(); } catch (e) { /* 略過 */ }
 }
 
+// 這一頁先顯示什麼：有預覽就用預覽（不用 pdf.js），沒有（或解不開）才用 pdf.js 畫
+async function showBase(n) {
+  if (S.pv && !S.pvFail) {
+    try {
+      const c = await previewCanvas(n);
+      const old = S.bases.get(n);
+      if (old) freeCanvas(old.canvas);
+      S.bases.set(n, { canvas: c, scale: c.width / S.sizes.get(n).w, preview: true });
+      return;
+    } catch (e) {
+      S.pvFail = true; // 這台的瀏覽器解不開 WebP 之類：改用 pdf.js
+    }
+  }
+  await renderBase(n);
+}
+// 預覽不夠清楚（例：電腦高解析度螢幕、適合寬度）：在背景用 pdf.js 畫清晰版換上去
+async function sharpen(n) {
+  const b = S.bases.get(n);
+  const sz = S.sizes.get(n);
+  if (!b || !b.preview || !sz) return;
+  const need = Math.min(fitScale(sz) * DPR(), Math.sqrt(CAPS.base / (sz.w * sz.h)));
+  if (b.scale >= need * 0.9) return; // 預覽已經夠清楚
+  if (b.sharpening) return;
+  b.sharpening = true;
+  try {
+    await S.docReady;
+    if (S.cur !== n || !S.doc) return;
+    const keep = b.canvas;
+    await renderBase(n);
+    const nb = S.bases.get(n);
+    if (S.cur === n && nb && nb.canvas !== keep) {
+      const pg = $('#pdf-page');
+      if (keep.parentNode === pg) { pg.replaceChild(nb.canvas, keep); layout(); }
+      S.stats.sharp++;
+      S.timing.lastSharp = Date.now();
+    }
+  } catch (e) { /* 清晰版畫不出來就留著預覽 */ }
+}
+
 async function renderBase(n) {
+  await S.docReady;
+  if (!S.doc) return;
   const sz = S.sizes.get(n);
   const dpr = DPR();
   // 底圖：適合畫面的大小 × 裝置像素比，但總像素不超過上限
@@ -341,8 +491,11 @@ async function renderDetail() {
   const c = document.createElement('canvas');
   c.className = 'pdf-detail';
   const t0 = performance.now();
+  await S.docReady;
+  if (!S.doc) return;
   const page = await S.doc.getPage(n);
   if (n !== S.cur) return;
+  S.stats.detail++;
   const old = S.detail;
   S.detail = { canvas: c, css, x: x0, y: y0 };
   c.style.width = `${(x1 - x0)}px`;
@@ -535,7 +688,9 @@ function markThumb() {
   }
 }
 async function pumpThumbs() {
-  if ($('#pdf-thumbs').hidden || !S.doc) return;
+  if ($('#pdf-thumbs').hidden) return;
+  if (S.pv && !S.pvFail) return pumpPvThumbs();
+  if (!S.doc) return;
   while (S.thumbQ.length && S.thumbBusy < CAPS.thumbs && !S.rendering) {
     const n = S.thumbQ.shift();
     const el = $('#pdf-thumbs').children[n - 1];
@@ -562,6 +717,42 @@ async function pumpThumbs() {
     } catch (e) { /* 縮圖失敗不影響主畫面 */ } finally {
       S.thumbBusy--;
     }
+  }
+}
+
+// 縮圖（v0.7.1）：檔案裡的小縮圖，看得到的那幾張一次抓（連續的一段），不用 pdf.js、不搶主畫面
+async function pumpPvThumbs() {
+  if (S.thumbBusy || !S.thumbQ.length) return;
+  S.thumbBusy = 1;
+  const token = S.token;
+  try {
+    while (S.thumbQ.length && token === S.token) {
+      const want = S.thumbQ.splice(0, 24).sort((a, b) => a - b);
+      const ps = want.map((n) => S.pv.pages[n - 1]);
+      const a = Math.min(...ps.map((p) => p[4])), z = Math.max(...ps.map((p) => p[4] + p[5]));
+      const buf = await S.get(a, z - a);
+      if (token !== S.token) return;
+      for (let i = 0; i < want.length; i++) {
+        const el = $('#pdf-thumbs').children[want[i] - 1];
+        if (!el || el.dataset.done) continue;
+        const p = ps[i];
+        try {
+          const bm = await createImageBitmap(new Blob([buf.slice(p[4] - a, p[4] - a + p[5])], { type: `image/${S.pv.fmt || 'webp'}` }));
+          const c = document.createElement('canvas');
+          c.width = bm.width;
+          c.height = bm.height;
+          const ctx = c.getContext('2d');
+          ctx.drawImage(bm, 0, 0);
+          bm.close && bm.close();
+          if (S.wm) watermark(ctx, c.width, c.height, 0, 0, c.width, c.height);
+          c.className = 'pt-canvas';
+          el.querySelector('.pt-img').appendChild(c);
+          el.dataset.done = '1';
+        } catch (e) { /* 這張縮圖壞了就算了 */ }
+      }
+    }
+  } finally {
+    S.thumbBusy = 0;
   }
 }
 
@@ -597,6 +788,19 @@ export function init(hooks) {
       bases: [...S.bases.keys()], detail: S.detail ? [S.detail.canvas.width, S.detail.canvas.height] : null, wm: S.wm, rendering: S.rendering }; },
     // 浮水印有沒有畫進 canvas：同一頁有／沒有浮水印各畫一次，比較像素
     async wmProbe() {
+      if (S.pv && !S.pvFail) { // 預覽：同一張預覽有／沒有浮水印各畫一次
+        const keep0 = S.wm;
+        const a = await previewCanvas(S.cur);
+        S.wm = '';
+        const b = await previewCanvas(S.cur);
+        S.wm = keep0;
+        const pa = a.getContext('2d').getImageData(0, 0, a.width, a.height).data, pb = b.getContext('2d').getImageData(0, 0, b.width, b.height).data;
+        let diff = 0;
+        for (let i = 0; i < pa.length; i += 4) if (Math.abs(pa[i] - pb[i]) + Math.abs(pa[i + 1] - pb[i + 1]) + Math.abs(pa[i + 2] - pb[i + 2]) > 12) diff++;
+        freeCanvas(a); freeCanvas(b);
+        return { on: !!keep0, text: keep0, diffRatio: +(diff / (pa.length / 4)).toFixed(4), preview: true };
+      }
+      await S.docReady;
       const page = await S.doc.getPage(S.cur);
       const a = document.createElement('canvas'), b = document.createElement('canvas');
       const keep = S.wm;
