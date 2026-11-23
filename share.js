@@ -6,6 +6,7 @@
 // 螢幕上看得到的東西，技術上一定擷取得到；這些措施是控制、提醒和追查，不是「別人就拿不到」。
 import { CONFIG } from './config.js';
 import { renderNotice, AGREE, DISAGREE, IP_SERVICE } from './notice.js';
+import { rangeFetcher } from './cloud.js';
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
@@ -27,13 +28,16 @@ if (isLocal && /^http:\/\/127\.0\.0\.1:\d+$/.test(params.get('gbase') || '')) {
 }
 
 export function isShareLink() { return params.has('s'); }
+// v0.7.0：分享的是 PDF 時，桌面程式在連結加 &type=pdf（只影響聲明的用字；真正的格式看檔案內容）
+const KIND = params.get('type') === 'pdf' ? 'pdf' : '';
+const WHAT = KIND === 'pdf' ? '文件' : '模型';
 
 const STATUS_TEXT = {
-  expired: ['這條分享連結已經過期', '有效期限已過，模型不會再顯示。如果還需要看，請聯絡分享給你的人重新分享。'],
-  revoked: ['這條分享連結已被取消', '分享的人已經取消這條連結，模型不會再顯示。'],
+  expired: ['這條分享連結已經過期', `有效期限已過，${WHAT}不會再顯示。如果還需要看，請聯絡分享給你的人重新分享。`],
+  revoked: ['這條分享連結已被取消', `分享的人已經取消這條連結，${WHAT}不會再顯示。`],
   unknown: ['找不到這條分享連結', '可能已經刪除，或網址不完整（請確認整段網址都有複製到）。'],
   busy: ['開啟次數太頻繁', '這條連結短時間內開啟太多次，請過幾分鐘再試。'],
-  offline: ['沒辦法確認這條連結', '分享的模型每次開啟都要先上網確認連結還有效，沒有網路時不會顯示。請連上網路後重新整理。<br>如果網路正常還是這樣，可能是連結網址不完整，或分享的人已經停用這條連結，請聯絡分享給你的人。'],
+  offline: ['沒辦法確認這條連結', `分享的${WHAT}每次開啟都要先上網確認連結還有效，沒有網路時不會顯示。請連上網路後重新整理。<br>如果網路正常還是這樣，可能是連結網址不完整，或分享的人已經停用這條連結，請聯絡分享給你的人。`],
   bad: ['連結不完整', '這條分享連結少了一部分，請確認整段網址都有複製到。'],
 };
 
@@ -102,7 +106,7 @@ export function fmtDate(iso) {
 
 function askNotice(fields) {
   return new Promise((resolve) => {
-    $('#notice-text').innerHTML = renderNotice(fields);
+    $('#notice-text').innerHTML = renderNotice(fields, undefined, KIND);
     $('#notice-yes').textContent = AGREE;
     $('#notice-no').textContent = DISAGREE;
     $('#notice').hidden = false;
@@ -135,7 +139,7 @@ export async function openShare(ui) {
   if (!(h && readAgreed()[h])) {
     const ok = await askNotice({ 收件人稱呼: label.slice(0, 40), 代號: c.code, 到期日: fmtDate(c.expires), 設計公司名稱: c.company, 聯絡方式: c.contact });
     if (!ok) {
-      ui.showProblem('沒有開啟', '你選了「不同意」，所以沒有載入模型，也沒有記錄。要看的話請重新整理網頁。', false);
+      ui.showProblem('沒有開啟', `你選了「不同意」，所以沒有載入${WHAT}，也沒有記錄。要看的話請重新整理網頁。`, false);
       document.body.dataset.share = 'declined';
       return;
     }
@@ -155,11 +159,31 @@ export async function openShare(ui) {
   if (o.status !== 'active' || !o.file) return problem(ui, o.status in STATUS_TEXT ? o.status : 'unknown');
   const name = `#${o.code}`;
   ui.loadBegin({ name, size: 0 });
+  const media = `${base}/drive/v3/files/${encodeURIComponent(o.file)}?alt=media&key=${encodeURIComponent(apiKey)}`;
+  // v0.7.0：PDF 分段讀取（不先下載整個檔案）；cache:'no-store'、不帶 cookie，不留在對方手機
+  let meta = null;
+  try {
+    meta = await getJson(`${base}/drive/v3/files/${encodeURIComponent(o.file)}?fields=size,mimeType&key=${encodeURIComponent(apiKey)}`);
+  } catch (e) {
+    if (e.status === 404 || e.status === 403) return problem(ui, 'revoked');
+    return problem(ui, 'offline');
+  }
+  if (meta.mimeType === 'application/pdf') {
+    document.body.classList.add('shared');
+    try {
+      await ui.openPdf({ size: Number(meta.size || 0), fetchRange: rangeFetcher(media) }, name, t0, { share: { code: o.code, expires: o.expires } });
+    } catch (e) {
+      if (e.status === 404 || e.status === 403) return problem(ui, 'revoked');
+      if (e.status || /fetch|network/i.test(String(e.message))) return problem(ui, 'offline');
+      throw e;
+    }
+    document.body.dataset.share = 'open';
+    return true;
+  }
   ui.showLoading('下載模型…');
   let buf;
   try {
-    const res = await fetch(`${base}/drive/v3/files/${encodeURIComponent(o.file)}?alt=media&key=${encodeURIComponent(apiKey)}`,
-      { cache: 'no-store', credentials: 'omit' });
+    const res = await fetch(media, { cache: 'no-store', credentials: 'omit' });
     if (!res.ok) return problem(ui, res.status === 404 || res.status === 403 ? 'revoked' : 'offline');
     const total = Number(res.headers.get('Content-Length') || 0);
     if (res.body && total) {

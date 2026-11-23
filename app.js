@@ -7,8 +7,9 @@ import { mergeGeometries } from './lib/BufferGeometryUtils.js';
 import * as cloud from './cloud.js';
 import * as mem from './memory.js';
 import * as share from './share.js';
+import * as pdfv from './pdfview.js';
 
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.7.0';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -178,7 +179,7 @@ function fail(err) {
   loadEnd();
   if (loadingModel) {
     loadingModel = false;
-    showProblem('模型開不起來', `${err && err.message ? err.message : err}`, true);
+    showProblem('檔案開不起來', `${err && err.message ? err.message : err}`, true);
     console.error(err);
     return;
   }
@@ -223,9 +224,10 @@ canvas.addEventListener('webglcontextlost', (e) => {
 }, false);
 
 async function loadBuffer(buf, name, t0, opts = {}) {
+  if (pdfv.isPdf(buf)) return openPdf({ data: buf }, name, t0, opts); // v0.7.0：PDF
   const head = new Uint8Array(buf, 0, 4);
   if (String.fromCharCode(...head) !== 'glTF') {
-    throw new Error('這不是瀏覽檔（.glb）。請在電腦用「SKP 轉檔上傳」程式把 .skp 轉檔產生。');
+    throw new Error('這不是瀏覽檔（.glb）或 PDF。請在電腦用「SKP 轉檔上傳」程式把 .skp 或 .pdf 轉檔上傳。');
   }
   const tRead = performance.now();
   showLoading('建立模型…');
@@ -283,7 +285,39 @@ async function loadBuffer(buf, name, t0, opts = {}) {
   document.title = `${data.title || name.replace(/\.glb$/i, '')} — SKP 瀏覽器`;
 }
 
+// ---------- PDF（v0.7.0）：src＝{ data } 或 { size, fetchRange }（分段讀取）----------
+let pdfInfo = null;
+async function openPdf(src, name, t0 = performance.now(), opts = {}) {
+  const wasEmpty = app.classList.contains('empty');
+  const wasPdf = app.classList.contains('pdf');
+  showLoading('開啟 PDF…');
+  app.classList.add('pdf');
+  app.classList.remove('empty');
+  let r;
+  try {
+    r = await pdfv.openPdf(src, { name, share: opts.share, t0, hooks: { toast } });
+  } catch (err) {
+    if (!wasPdf) app.classList.remove('pdf');
+    if (wasEmpty) app.classList.add('empty');
+    throw err;
+  }
+  if (!r) return; // 已經改開別的檔案
+  if (model) { scene.remove(model); disposeTree(model); model = null; } // 3D 模型的記憶體放掉
+  setWatermark('');
+  pdfInfo = { ...r, name, info: pdfv.info() };
+  fileInfo = { name, bytes: r.bytes, share: r.share, pdf: true };
+  document.body.classList.toggle('shared', !!r.share);
+  hideLoading();
+  loadEnd();
+  loadingModel = false;
+  updateMeta();
+  document.title = `${r.share ? '#' + r.share.code : name.replace(/\.pdf$/i, '')} — SKP 瀏覽器`;
+  if (r.mode === 'range') toast(`分段讀取：只下載看到的頁（全檔 ${mb(r.bytes)}）`, 2500);
+  return r;
+}
+
 function setModel(root, extras) {
+  if (app.classList.contains('pdf')) { pdfv.close(); app.classList.remove('pdf'); pdfInfo = null; document.body.classList.remove('shared'); }
   if (model) {
     scene.remove(model);
     disposeTree(model);
@@ -1005,6 +1039,26 @@ function toast(text, ms = 2000) {
 }
 function mb(bytes) { return bytes < 1048576 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
 function updateMeta() {
+  $('#info-title').textContent = fileInfo.pdf ? '文件資訊' : '模型資訊';
+  $('#info-pdf-help').hidden = !fileInfo.pdf;
+  $('#info-3d-help').hidden = !!fileInfo.pdf;
+  if (fileInfo.pdf) {
+    const i = pdfv.info();
+    $('#model-name').textContent = fileInfo.share ? `#${fileInfo.share.code}` : fileInfo.name.replace(/\.pdf$/i, '');
+    $('#model-meta').textContent = `${mb(i.bytes)} · ${i.pages} 頁`;
+    const t = i.timing || {};
+    const rows = [
+      ['檔案', fileInfo.share ? `#${fileInfo.share.code}` : fileInfo.name],
+      ['大小', mb(i.bytes)],
+      ['頁數', i.pages],
+      ['讀取方式', i.mode === 'range' ? `分段讀取（目前已下載 ${mb(i.fetched)}，${i.requests} 次）` : '整個檔案'],
+      ['開啟時間', `${((t.firstPage || 0) / 1000).toFixed(2)} 秒看到第一頁`],
+      ...(fileInfo.share ? [['分享', `#${fileInfo.share.code}，有效到 ${share.fmtDate(fileInfo.share.expires)}（僅供檢視，不提供下載和列印）`]] : []),
+      ['瀏覽器', `${APP_VERSION}（${{ phone: '手機', tablet: '平板', desktop: '電腦' }[mem.DEVICE]}）`],
+    ];
+    $('#info-list').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('');
+    return;
+  }
   $('#model-name').textContent = data.title || (fileInfo.name || '模型').replace(/\.glb$/i, '');
   const st = data.stats || {};
   $('#model-meta').textContent = `${mb(fileInfo.bytes)} · ${(data.scenes || []).length} 個場景 · 載入 ${(fileInfo.timing.total / 1000).toFixed(1)} 秒`;
@@ -1024,7 +1078,7 @@ function updateMeta() {
   $('#info-list').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('');
 }
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-$('#info-btn').addEventListener('click', () => { $('#info').hidden = false; });
+$('#info-btn').addEventListener('click', () => { if (fileInfo.pdf) updateMeta(); $('#info').hidden = false; });
 $('#info-close').addEventListener('click', () => { $('#info').hidden = true; });
 $('#info').addEventListener('click', (e) => { if (e.target.id === 'info') $('#info').hidden = true; });
 
@@ -1121,17 +1175,19 @@ window.skpv = {
   controls,
   get renderer() { return renderer; },
 };
-cloud.init({ loadBuffer, showLoading, hideLoading, fail, toast, loadBegin, showProblem, device: mem.DEVICE, warnMB: mem.WARN_FILE_MB });
+pdfv.init({ toast });
+cloud.init({ loadBuffer, openPdf, showLoading, hideLoading, fail, toast, loadBegin, showProblem, device: mem.DEVICE, warnMB: mem.WARN_FILE_MB });
 const lastFailed = checkLastLoad();
 setAxes([...axes]);
 if (params.get('axes') != null) setAxes(params.get('axes').split(''));
 $('#cloud-btn').addEventListener('click', () => cloud.showList());
 $('#welcome-cloud').addEventListener('click', () => cloud.showList());
-const shareUi = { loadBuffer, showLoading, hideLoading, toast, loadBegin, showProblem, device: mem.DEVICE };
+const shareUi = { loadBuffer, openPdf, showLoading, hideLoading, toast, loadBegin, showProblem, device: mem.DEVICE };
 const first = share.isShareLink() ? share.openShare(shareUi).catch(fail)
   : params.get('m') ? cloud.openCloud(params.get('m')) : params.get('src') ? openUrl(params.get('src')) : null;
 if (first) {
   first.then(() => {
+    if (app.classList.contains('pdf')) { document.body.dataset.ready = '1'; return; }
     if (!model) return;
     if (params.get('scene') != null) goScene(Number(params.get('scene')), false);
     if (params.get('edges') === '0') setEdges(false);

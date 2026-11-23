@@ -113,21 +113,38 @@ async function api(path, { method = 'GET', query = {}, body, raw = false, useKey
   return res.status === 204 ? {} : res.json();
 }
 
-// ---------- 開啟雲端模型 ----------
+// ---------- 開啟雲端檔案 ----------
+// PDF（v0.7.0）：不先下載整個檔案，pdf.js 要哪一段就抓哪一段（Drive 支援 Range）。cache:'no-store'、不帶 cookie。
+export function rangeFetcher(url, headers = {}) {
+  return async (begin, end) => {
+    const res = await fetch(url, { headers: { ...headers, Range: `bytes=${begin}-${end - 1}` }, cache: 'no-store', credentials: 'omit' });
+    if (res.status === 206) return res.arrayBuffer();
+    if (res.ok) { // 伺服器不支援 Range：給整個檔案
+      const full = await res.arrayBuffer();
+      return begin === 0 ? { full } : full.slice(begin, end);
+    }
+    throw Object.assign(new Error(`Google Drive ${res.status}`), { status: res.status });
+  };
+}
+function mediaUrl(id, useKey) {
+  return `${DRIVE()}/files/${encodeURIComponent(id)}?alt=media${useKey ? '&key=' + encodeURIComponent(apiKey) : ''}`;
+}
+export const isPdfMeta = (m) => (m && (m.mimeType === 'application/pdf' || /\.pdf$/i.test(m.name || '') || (m.appProperties || {}).kind === 'pdf'));
+
 async function download(id, useKey) {
-  let meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,appProperties' }, useKey });
+  let meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,mimeType,appProperties' }, useKey });
   const mainName = meta.name;
   const mainReq = id;
   const mobileId = meta.appProperties && meta.appProperties.mobile;
   // 手機：有「手機版」（桌面程式 v0.5 起自動產生：貼圖縮小）就改下載手機版（v0.5）
   if (ui.device === 'phone' && mobileId && params.get('full') !== '1') {
     try {
-      const m = await api(`/files/${encodeURIComponent(mobileId)}`, { query: { fields: 'id,name,size' }, useKey });
-      meta = { ...m, name: mainName };
+      const m = await api(`/files/${encodeURIComponent(mobileId)}`, { query: { fields: 'id,name,size,mimeType' }, useKey });
+      meta = { ...m, name: mainName, appProperties: meta.appProperties };
       id = mobileId;
-      ui.toast(`手機自動改用手機版（${mb(Number(m.size || 0))}，貼圖較小）`, 3500);
+      ui.toast(`手機自動改用手機版（${mb(Number(m.size || 0))}，${isPdfMeta(meta) ? '影像較小' : '貼圖較小'}）`, 3500);
     } catch (e) { /* 手機版不見了就用原檔 */ }
-  } else if (Number(meta.size || 0) / 1048576 > (ui.warnMB || Infinity)) {
+  } else if (!isPdfMeta(meta) && Number(meta.size || 0) / 1048576 > (ui.warnMB || Infinity)) {
     const size = mb(Number(meta.size || 0));
     if (!confirm(`這個模型很大（${size}），${ui.device === 'phone' ? '手機' : '這台裝置'}的記憶體可能不夠、開到一半網頁會被重新整理。\n\n` +
       '建議：請上傳的人用新版「SKP 轉檔上傳」重新上傳（會自動產生手機版），或改用電腦／平板開。\n\n仍要試著開啟嗎？')) {
@@ -139,6 +156,12 @@ async function download(id, useKey) {
     }
   }
   if (ui.loadBegin) ui.loadBegin({ name: meta.name, size: Number(meta.size || 0), id });
+  if (isPdfMeta(meta)) {
+    if (!useKey && !signedIn()) await signIn();
+    const headers = useKey ? {} : { Authorization: 'Bearer ' + auth.token };
+    window.__skpvCloudLoaded = { requested: mainReq, loaded: id, mobile: id !== mainReq, pdf: true }; // 測試用
+    return { pdf: { size: Number(meta.size || 0), fetchRange: rangeFetcher(mediaUrl(id, useKey), headers) }, name: meta.name };
+  }
   ui.showLoading(`下載 ${meta.name}（${mb(Number(meta.size || 0))}）…`);
   const res = await api(`/files/${encodeURIComponent(id)}`, { query: { alt: 'media' }, raw: true, useKey });
   const total = Number(meta.size || res.headers.get('Content-Length') || 0);
@@ -169,7 +192,10 @@ export async function openCloud(id) {
     let got = null;
     // 1. 先試「有連結就能看」（不用登入）
     if (apiKey && !signedIn()) {
-      try { got = await download(id, true); } catch (e) { if (![403, 404].includes(e.status)) throw e; }
+      try {
+        got = await download(id, true);
+        if (got.pdf) await got.pdf.fetchRange(0, 1); // 公開才讀得到；沒公開就改用登入
+      } catch (e) { got = null; if (![403, 404].includes(e.status)) throw e; }
     }
     // 2. 沒分享（或已登入）：用自己的 Google 帳號
     if (!got) {
@@ -181,7 +207,8 @@ export async function openCloud(id) {
       auth = auth || loadStored();
       got = await download(id, false);
     }
-    await ui.loadBuffer(got.buf, got.name, t0);
+    if (got.pdf) await ui.openPdf(got.pdf, got.name, t0);
+    else await ui.loadBuffer(got.buf, got.name, t0);
     currentId = id;
     const u = new URL(location.href);
     ['src', 'm'].forEach((k) => u.searchParams.delete(k));
@@ -237,7 +264,7 @@ async function refresh() {
   try {
     const res = await api('/files', { query: {
       q: "appProperties has { key='skpv' and value='1' } and trashed=false",
-      fields: 'files(id,name,size,modifiedTime,thumbnailLink,permissionIds,appProperties)',
+      fields: 'files(id,name,size,mimeType,modifiedTime,thumbnailLink,permissionIds,appProperties)',
       orderBy: 'modifiedTime desc', pageSize: '200',
     } });
     files = res.files || [];
@@ -254,27 +281,28 @@ function renderMsg(text) {
 function renderSignIn() {
   $('#cloud-account').textContent = '';
   $('#cloud-logout').hidden = true;
-  $('#cloud-list').innerHTML = `<div class="cloud-msg"><p>登入上傳模型的 Google 帳號，就能看到全部模型。</p>
+  $('#cloud-list').innerHTML = `<div class="cloud-msg"><p>登入上傳檔案的 Google 帳號，就能看到全部模型和文件。</p>
     <button class="btn primary big" id="cloud-signin">用 Google 登入</button>
-    <p class="small">只會讀取「SKP 轉檔上傳」程式上傳的模型，看不到你 Google Drive 裡的其他檔案。</p></div>`;
+    <p class="small">只會讀取「SKP 轉檔上傳」程式上傳的模型和文件，看不到你 Google Drive 裡的其他檔案。</p></div>`;
   $('#cloud-signin').onclick = async () => {
     try { await signIn(); await refresh(); } catch (e) { ui.toast(e.message, 4000); }
   };
 }
 function renderList() {
   if (!files.length) {
-    renderMsg('還沒有模型。請在電腦用「SKP 轉檔上傳」程式選 .skp 上傳。');
+    renderMsg('還沒有檔案。請在電腦用「SKP 轉檔上傳」程式選 .skp 或 .pdf 上傳。');
     return;
   }
   $('#cloud-list').innerHTML = files.map((f) => {
     const shared = (f.permissionIds || []).includes('anyoneWithLink');
     const t = new Date(f.modifiedTime);
     const when = isNaN(t) ? '' : `${t.getFullYear()}/${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-    const name = f.name.replace(/\.glb$/i, '');
+    const pdf = isPdfMeta(f);
+    const name = f.name.replace(/\.(glb|pdf)$/i, '');
     const thumb = f.thumbnailLink ? `<img src="${esc(f.thumbnailLink)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : '';
     return `<div class="mitem${f.id === currentId ? ' current' : ''}" data-id="${esc(f.id)}">
       <button class="mopen" data-act="open"><span class="mthumb">${thumb}</span>
-        <span class="mtext"><b>${esc(name)}</b><span class="small">${when} · ${mb(Number(f.size || 0))}${f.appProperties && f.appProperties.scenes ? ` · ${esc(f.appProperties.scenes)} 個場景` : ''}</span>
+        <span class="mtext"><b>${esc(name)}</b><span class="small"><span class="mkind ${pdf ? 'pdf' : 'skp'}">${pdf ? 'PDF' : '3D'}</span> ${when} · ${mb(Number(f.size || 0))}${pdf && f.appProperties && f.appProperties.pages ? ` · ${esc(f.appProperties.pages)} 頁` : ''}${!pdf && f.appProperties && f.appProperties.scenes ? ` · ${esc(f.appProperties.scenes)} 個場景` : ''}</span>
         <span class="mshare ${shared ? 'on' : ''}">${shared ? '舊式公開分享中（原檔，沒有期限）' : '只有我'}${f.appProperties && f.appProperties.mobile ? ' · 有手機版' : ''}</span></span></button>
       <div class="macts">${shared ? '<button class="btn" data-act="share">複製舊式連結</button><button class="btn" data-act="unshare">取消舊式分享</button>'
         : '<span class="small">分享：用電腦的「SKP 轉檔上傳」新增（每人一條）</span>'}</div></div>`;

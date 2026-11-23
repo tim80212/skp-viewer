@@ -184,3 +184,36 @@ dd { margin: 0; word-break: break-all; }
 #notice-text p { margin: 6px 0; }
 .notice-btns { position: sticky; bottom: -18px; display: flex; gap: 10px; justify-content: flex-end; padding: 12px 0 4px; background: var(--card, #fff); }
 .notice-btns .btn { flex: 1 1 0; max-width: 220px; }
+
+/* ---------- PDF 檢視（v0.7.0） ---------- */
+#pdf-view, #pdf-thumbs, #pdf-tools { display: none; }
+#app.pdf #stage, #app.pdf #scenes, #app.pdf #tools { display: none; }
+#app.pdf #pdf-view { display: block; grid-area: stage; position: relative; overflow: hidden; min-height: 0; background: #5b6672;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#pdf-page { position: absolute; left: 0; top: 0; transform-origin: 0 0; background: #fff; box-shadow: 0 2px 14px rgba(0,0,0,.35); }
+#pdf-page.blank { background: #fff linear-gradient(90deg, #fff 0, #eef1f4 50%, #fff 100%); }
+#pdf-page canvas { position: absolute; left: 0; top: 0; display: block; }
+#pdf-page canvas.pdf-base { width: 100%; height: 100%; }
+#pdf-page canvas.pdf-detail { transform-origin: 0 0; }
+#app.pdf #pdf-thumbs:not([hidden]) { display: flex; grid-area: scenes; gap: 6px; overflow-x: auto; overflow-y: hidden;
+  padding: 6px calc(8px + var(--safe-r)) 6px calc(8px + var(--safe-l)); background: #f5f7fa; border-top: 1px solid var(--line);
+  scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.pthumb { flex: 0 0 auto; width: 60px; padding: 2px; border: 2px solid transparent; border-radius: 6px; background: transparent; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.pthumb .pt-img { width: 56px; height: 76px; background: #fff; display: flex; align-items: center; justify-content: center; overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.pthumb img { max-width: 56px; max-height: 76px; display: block; }
+.pthumb .pt-n { font-size: 11px; color: var(--muted); }
+.pthumb.cur { border-color: var(--primary); }
+.pthumb.cur .pt-n { color: var(--primary); font-weight: 700; }
+#app.pdf #pdf-tools { display: flex; grid-area: tools; justify-content: space-around; align-items: stretch; background: #fff;
+  border-top: 1px solid var(--line); padding: 0 var(--safe-r) var(--safe-b) var(--safe-l); }
+#pdf-tools .tool:disabled { opacity: .3; cursor: default; }
+#pdf-tools .tool.on { color: var(--primary); font-weight: 700; }
+.pdf-pageno { display: flex; align-items: center; gap: 4px; font-size: 14px; color: var(--muted); white-space: nowrap; }
+#pdf-num { width: 3.2em; height: 28px; text-align: center; font-size: 15px; border: 1px solid var(--line); border-radius: 6px; padding: 0; }
+@media (max-width: 420px) { #pdf-tools .tool span:not(.ic) { display: none; } #pdf-tools #pdf-fit, #pdf-tools #pdf-thumb-btn { font-size: 13px; } }
+/* 分享的文件：不給列印（只擋介面，擋不住截圖） */
+@media print { body.shared * { display: none !important; } body.shared::after { content: '這份文件僅供線上檢視，不提供列印。'; } }
+.mkind { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; color: #fff; background: #52606d; vertical-align: 1px; }
+.mkind.pdf { background: #c24e2a; }

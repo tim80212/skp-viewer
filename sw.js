@@ -1,7 +1,7 @@
-// 離線快取：只有網頁本身（同網域的程式、圖示）。模型檔、Google、紀錄端點一律不經過這裡、不快取（v0.6.0：分享的模型不留在對方手機）
-const CACHE = 'skpv-0.6.0';
+// 離線快取：只有網頁本身（同網域的程式、圖示；pdf.js 用到時才快取）。模型檔、PDF、Google、紀錄端點一律不經過這裡、不快取（v0.6.0：分享的檔案不留在對方手機）
+const CACHE = 'skpv-0.7.0';
 const FILES = [
-  './', './index.html', './app.css', './app.js', './cloud.js', './share.js', './notice.js', './memory.js', './config.js', './manifest.webmanifest',
+  './', './index.html', './app.css', './app.js', './cloud.js', './share.js', './notice.js', './pdfview.js', './memory.js', './config.js', './manifest.webmanifest',
   './lib/three.module.min.js', './lib/OrbitControls.js', './lib/GLTFLoader.js', './lib/BufferGeometryUtils.js',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',
 ];

@@ -31,6 +31,9 @@ export const NOTICE = `
 export const AGREE = '我同意並開啟';
 export const DISAGREE = '不同意';
 
+// PDF 文件（v0.7.0）：同一份聲明，把下面左邊的字換成右邊（照順序換，所以「3D 模型」要排在「模型」前面）
+export const PDF_WORDS = [['本 3D 模型', '本文件'], ['3D 模型', '文件'], ['本模型', '本文件']];
+
 // 欄位沒有值時顯示的文字
 export const FALLBACK = {
   收件人稱呼: '本連結的收件人',
@@ -44,7 +47,8 @@ export const IP_SERVICE = 'https://api.ipify.org?format=json';
 // ---- 以下是把上面的文字轉成畫面（不用改）----
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-export function renderNotice(fields, text = NOTICE) {
+export function renderNotice(fields, text = NOTICE, kind = '') {
+  if (kind === 'pdf') for (const [a, b] of PDF_WORDS) text = text.split(a).join(b);
   const fill = (s) => esc(s).replace(/\{([^{}]{1,10})\}/g, (m, k) => {
     const v = fields[k] || FALLBACK[k];
     return v ? esc(v) : m;
