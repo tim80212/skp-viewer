@@ -217,3 +217,5 @@ dd { margin: 0; word-break: break-all; }
 @media print { body.shared * { display: none !important; } body.shared::after { content: '這份文件僅供線上檢視，不提供列印。'; } }
 .mkind { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; color: #fff; background: #52606d; vertical-align: 1px; }
 .mkind.pdf { background: #c24e2a; }
+/* v0.8.0 圖磚：一張跟畫面一樣大的畫布 */
+#pdf-view canvas.pdf-tiles { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }

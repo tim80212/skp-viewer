@@ -29,8 +29,12 @@ const S = {
   detail: null, detailTimer: 0, rendering: 0, wm: '', name: '', bytes: 0, fetched: 0, requests: 0,
   open: false, token: 0, mode: '', timing: {}, thumbObs: null, thumbQ: [], thumbBusy: 0, gesture: false,
   pv: null, pvCache: new Map(), pvFail: false, head: null, get: null, docReady: null, stats: { previews: 0, sharp: 0, detail: 0 },
+  tl: null, tc: null, tcache: new Map(), tcachePx: 0, tq: new Map(), tinflight: 0, tdraw: 0, tview: 0, tstat: { tiles: 0, bytes: 0, reqs: 0 },
 };
 const PV_TAG = '%SKPV-PREVIEW ';
+const NO_VECTOR = new URLSearchParams(location.search).get('vector') === '0';
+// v0.8.0 圖磚：一次最多幾個請求、相鄰多近就合併成一個請求、快取多少像素
+const TL = { conc: 4, gap: 24 * 1024, maxReq: 3 * 1048576, cachePx: DEVICE === 'phone' ? 48e6 : DEVICE === 'tablet' ? 80e6 : 160e6 };
 
 async function lib() {
   if (!pdfjs) {
@@ -51,8 +55,15 @@ export function isPdf(buf) {
 export async function openPdf(src, { name = '', share = null, t0 = performance.now(), hooks } = {}) {
   ui = hooks || ui;
   const lib0 = performance.now();
-  const libP = lib(); // v0.7.1：pdf.js（約 1.8 MB）跟第一段資料同時下載；有預覽的話不用等它就能先顯示
-  libP.then(() => { S.timing.lib = +(performance.now() - lib0).toFixed(0); }).catch(() => {});
+  // pdf.js（約 1.8 MB）：有圖磚（v0.8.0）的檔案完全不載入；有預覽（v0.7.1）的跟第一段資料同時下載
+  let libP = null;
+  const getLib = () => {
+    if (!libP) {
+      libP = lib();
+      libP.then(() => { S.timing.lib = +(performance.now() - lib0).toFixed(0); }).catch(() => {});
+    }
+    return libP;
+  };
   close();
   const token = ++S.token;
   S.name = name;
@@ -64,6 +75,8 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.timing = {};
   S.stats = { previews: 0, sharp: 0, detail: 0 };
   S.docReady = null;
+  S.tl = null;
+  S.tstat = { tiles: 0, bytes: 0, reqs: 0 };
   const common = {
     cMapUrl: new URL('./lib/pdfjs/cmaps/', import.meta.url).href, cMapPacked: true,
     standardFontDataUrl: new URL('./lib/pdfjs/standard_fonts/', import.meta.url).href,
@@ -115,7 +128,7 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     }
   }
   const startDoc = async () => {
-    const P = await libP;
+    const P = await getLib();
     if (token !== S.token) throw new Error('canceled');
     S.task = P.getDocument(makeParams(P));
     return S.task.promise;
@@ -125,7 +138,17 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   try { S.pv = await readIndex(firstBuf); } catch (e) { S.pv = null; }
   if (token !== S.token) return null;
   let shareInfo = null;
-  if (S.pv) {
+  if (S.pv && S.pv.v === 2) { // v0.8.0：圖磚，不用 pdf.js
+    S.tl = tilesFrom(S.pv);
+    S.pv = null;
+    shareInfo = S.tl.share || null;
+    checkShare(shareInfo, share);
+    S.n = S.tl.pages.length;
+    S.tl.pages.forEach((p, i) => S.sizes.set(i + 1, { w: p.w, h: p.h }));
+    S.docReady = null; // pdf.js 等到「放大超過圖磚」才載入
+    S.startDoc = startDoc;
+  } else if (S.pv) {
+    getLib();
     shareInfo = S.pv.share || null;
     checkShare(shareInfo, share);
     S.n = S.pv.pages.length;
@@ -144,6 +167,7 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     });
     S.docReady.catch(() => { if (token === S.token && ui && ui.toast) ui.toast('PDF 開不起來（預覽可以看，放大時沒辦法補清楚）', 5000); });
   } else {
+    getLib();
     const doc = await startDoc();
     if (token !== S.token) { doc.destroy(); return null; }
     S.doc = doc;
@@ -166,7 +190,7 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.timing.firstPage = +(performance.now() - t0).toFixed(0);
   S.timing.bytesAtFirstPage = S.fetched;
   window.__skpvPdfTiming = S.timing;
-  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv };
+  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl };
 }
 
 // 分享副本（第 2 層）：檔案裡寫著代號和到期時間，過期就不顯示（存了檔、換個方式打開也一樣）
@@ -195,7 +219,7 @@ async function readIndex(buf) {
   const m = /^%SKPV-PREVIEW (\d{12}) (\d{12})/.exec(head.slice(i));
   if (!m) return null;
   const js = JSON.parse(new TextDecoder().decode(await S.get(Number(m[1]), Number(m[2]))));
-  if (!js || js.v !== 1 || !Array.isArray(js.pages) || !js.pages.length) return null;
+  if (!js || (js.v !== 1 && js.v !== 2) || !Array.isArray(js.pages) || !js.pages.length) return null;
   return js;
 }
 function previewBitmap(n) {
@@ -239,11 +263,21 @@ export function close() {
   S.task = null;
   for (const pr of S.pvCache.values()) pr.then((b) => b.close && b.close()).catch(() => {});
   S.pvCache.clear();
+  for (const t of S.tcache.values()) if (t.bmp && t.bmp.close) t.bmp.close();
+  S.tcache.clear();
+  S.tcachePx = 0;
+  S.tq.clear();
+  S.tl = null;
+  if (S.tdet) { if (S.tdet.canvas) freeCanvas(S.tdet.canvas); S.tdet = null; }
+  clearTimeout(S.tvecTimer);
+  if (S.tc) { freeCanvas(S.tc); S.tc = null; }
+  $('#pdf-page').style.display = '';
 }
 
 export function info() {
   return { name: S.name, pages: S.n, bytes: S.bytes, mode: S.mode, fetched: S.fetched, requests: S.requests, share: S.share, timing: S.timing,
-    preview: !!S.pv && !S.pvFail, stats: { ...S.stats }, docReady: !!S.doc };
+    preview: !!S.pv && !S.pvFail, stats: { ...S.stats }, docReady: !!S.doc, tiles: !!S.tl, tileStats: { ...S.tstat, cached: S.tcache.size },
+    pdfjsLoaded: !!pdfjs };
 }
 
 function freeCanvas(c) { if (c) { c.width = 0; c.height = 0; c.remove(); } }
@@ -280,6 +314,7 @@ function maxZoom(sz) { return Math.min(40, Math.max(3, 4 / fitScale(sz))); }
 function layout() {
   const sz = S.sizes.get(S.cur);
   if (!sz) return;
+  if (S.tl) { clampPan(sz); if (!S.tview) S.tview = performance.now(); requestDraw(); return; }
   const { W, H } = viewRect();
   const sc = fitScale(sz) * S.zoom;
   const pw = sz.w * sc, ph = sz.h * sc;
@@ -300,6 +335,7 @@ function layout() {
 // ---------------------------------------------------------------- 換頁、繪製
 export async function go(n, first = false) {
   if (!S.open && !first) return;
+  if (S.tl) return tileGo(n, first);
   n = Math.max(1, Math.min(S.n, Math.round(n) || 1));
   const token = S.token;
   const t0 = performance.now();
@@ -394,6 +430,7 @@ async function sharpen(n) {
 }
 
 async function renderBase(n) {
+  if (!S.docReady && S.startDoc) S.docReady = S.startDoc();
   await S.docReady;
   if (!S.doc) return;
   const sz = S.sizes.get(n);
@@ -468,6 +505,7 @@ function dropDetail() {
   }
 }
 function scheduleDetail() {
+  if (S.tl) return;
   clearTimeout(S.detailTimer);
   S.detailTimer = setTimeout(renderDetail, 180);
 }
@@ -641,7 +679,7 @@ function setupGestures() {
       scheduleDetail();
     }
   }, { passive: false });
-  window.addEventListener('resize', () => { if (S.open) { for (const b of S.bases.values()) freeCanvas(b.canvas); S.bases.clear(); dropDetail(); go(S.cur, true); } });
+  window.addEventListener('resize', () => { if (S.open && S.tl) { requestDraw(); return; } if (S.open) { for (const b of S.bases.values()) freeCanvas(b.canvas); S.bases.clear(); dropDetail(); go(S.cur, true); } });
   window.addEventListener('keydown', (e) => {
     if (!S.open || e.target.tagName === 'INPUT') return;
     const k = e.key;
@@ -689,6 +727,7 @@ function markThumb() {
 }
 async function pumpThumbs() {
   if ($('#pdf-thumbs').hidden) return;
+  if (S.tl) return pumpTileThumbs();
   if (S.pv && !S.pvFail) return pumpPvThumbs();
   if (!S.doc) return;
   while (S.thumbQ.length && S.thumbBusy < CAPS.thumbs && !S.rendering) {
@@ -756,6 +795,280 @@ async function pumpPvThumbs() {
   }
 }
 
+// ---------------------------------------------------------------- 圖磚（v0.8.0）
+// 桌面程式用 PDFium 把每頁畫成多層圖磚（最清楚一層 300 dpi），網頁只抓畫面上看得到的那幾塊貼上去：
+// 縮放、平移、翻頁都不用 pdf.js 畫向量。先畫粗的層（已經有的放大），清楚的層到了再蓋上去，所以不會空白。
+function tilesFrom(js) {
+  const T = js.tile || 512;
+  const pages = js.pages.map((p) => {
+    const raw = Uint8Array.from(atob(p.t), (c) => c.charCodeAt(0));
+    const u = new Uint32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+    const L = p.d.length;
+    const grid = p.d.map(([w, h]) => ({ w, h, cols: Math.ceil(w / T), rows: Math.ceil(h / T) }));
+    const start = new Array(L);
+    let k0 = 0;
+    for (let k = L - 1; k >= 0; k--) { start[k] = k0; k0 += grid[k].cols * grid[k].rows; } // 檔案裡從最小一層放起
+    // 每塊：全白（不存）、跟同一層前面某塊一樣（canon 指到那塊）、一般（位置、長度）
+    const lens = new Uint32Array(u.length), webp = new Uint8Array(u.length), offs = new Float64Array(u.length);
+    const blank = new Uint8Array(u.length), canon = new Uint32Array(u.length);
+    let o = p.o;
+    for (let k = L - 1; k >= 0; k--) {
+      for (let j = 0, n = grid[k].cols * grid[k].rows; j < n; j++) {
+        const i = start[k] + j, v = u[i];
+        canon[i] = i;
+        if (v & 0x40000000) { blank[i] = 1; continue; }
+        if (v & 0x20000000) { const r = start[k] + (v & 0x1fffffff); canon[i] = canon[r]; blank[i] = blank[r]; continue; }
+        lens[i] = v & 0x1fffffff;
+        webp[i] = v >>> 31;
+        offs[i] = o;
+        o += lens[i];
+      }
+    }
+    return { w: p.w, h: p.h, L, grid, start, lens, webp, offs, blank, canon };
+  });
+  return { T, pages, share: js.share || null, dpi: js.dpi || 200 };
+}
+function tileCanvas() {
+  if (!S.tc) {
+    S.tc = document.createElement('canvas');
+    S.tc.className = 'pdf-tiles';
+    $('#pdf-view').appendChild(S.tc);
+  }
+  const { W, H } = viewRect();
+  const d = DPR();
+  const cw = Math.round(W * d), ch = Math.round(H * d);
+  if (S.tc.width !== cw || S.tc.height !== ch) { S.tc.width = cw; S.tc.height = ch; }
+  return S.tc;
+}
+function clampPan(sz) {
+  const { W, H } = viewRect();
+  const sc = fitScale(sz) * S.zoom;
+  const pw = sz.w * sc, ph = sz.h * sc;
+  S.panX = pw <= W ? (W - pw) / 2 : Math.min(0, Math.max(W - pw, S.panX));
+  S.panY = ph <= H ? (H - ph) / 2 : Math.min(0, Math.max(H - ph, S.panY));
+}
+function requestDraw() {
+  if (S.tdraw) return;
+  S.tdraw = requestAnimationFrame(() => { S.tdraw = 0; drawTiles(); });
+}
+function levelFor(pg, pxPerPt) { // 夠清楚的最粗一層（層和層之間不一定是 2 倍：v0.8.0 沒有放 75 dpi 那層）
+  for (let k = pg.L - 1; k > 0; k--) if (pg.grid[k].w / pg.w >= pxPerPt * 0.9) return k;
+  return 0;
+}
+function tkey(n, k, i) { return `${n}/${k}/${i}`; }
+// 畫一次：c＝目標畫布（預設畫面），wm＝要不要浮水印。回傳「該清楚的那層」還缺幾塊
+function drawTiles(c = null, wm = true) {
+  if (!S.tl || !S.open) return 0;
+  const n = S.cur, pg = S.tl.pages[n - 1], sz = S.sizes.get(n);
+  if (!pg || !sz) return 0;
+  const canvas = c || tileCanvas();
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const d = canvas.width / (viewRect().W || 1);
+  const css = fitScale(sz) * S.zoom, s = css * d, ox = S.panX * d, oy = S.panY * d;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#5b6672';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(ox, oy, pg.w * s, pg.h * s);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  const x0 = Math.max(0, -ox / s), y0 = Math.max(0, -oy / s);
+  const x1 = Math.min(pg.w, (canvas.width - ox) / s), y1 = Math.min(pg.h, (canvas.height - oy) / s);
+  const want = levelFor(pg, s);
+  let missing = 0;
+  for (let k = pg.L - 1; k >= want; k--) { // 粗的先畫，細的蓋上去
+    const g = pg.grid[k], f = g.w / pg.w, T = S.tl.T;
+    const cx0 = Math.max(0, Math.floor(x0 * f / T)), cx1 = Math.min(g.cols - 1, Math.floor((x1 * f - 1e-6) / T));
+    const cy0 = Math.max(0, Math.floor(y0 * f / T)), cy1 = Math.min(g.rows - 1, Math.floor((y1 * f - 1e-6) / T));
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const i = pg.canon[pg.start[k] + cy * g.cols + cx];
+        if (pg.blank[i]) continue; // 全白：頁面本來就是白底
+        const t = S.tcache.get(tkey(n, k, i));
+        if (t && t.bmp) {
+          S.tcache.delete(tkey(n, k, i)); S.tcache.set(tkey(n, k, i), t); // 最近用過
+          ctx.drawImage(t.bmp, ox + (cx * T) / f * s, oy + (cy * T) / f * s, t.bmp.width / f * s, t.bmp.height / f * s);
+        } else if (k === want || k === pg.L - 1) {
+          if (k === want) missing++;
+          needTile(n, k, i, k === want ? 0 : 1);
+        }
+      }
+    }
+  }
+  // 放大超過最清楚一層：向量即時補畫的那一塊（pdf.js，背景畫好才蓋上去）
+  const dt = S.tdet;
+  if (dt && dt.n === n && dt.canvas) {
+    ctx.drawImage(dt.canvas, ox + dt.x0 * s, oy + dt.y0 * s, (dt.x1 - dt.x0) * s, (dt.y1 - dt.y0) * s);
+  }
+  if (wm && S.wm) watermark(ctx, pg.w * s, pg.h * s, -ox, -oy, canvas.width, canvas.height);
+  if (!c) {
+    if (want === 0 && s > (pg.grid[0].w / pg.w) * 1.25) scheduleVector(n, s, x0, y0, x1, y1);
+    if (!missing && S.tview) { // 這次的畫面已經全部清楚
+      S.timing.lastSharp = +(performance.now() - S.tview).toFixed(0);
+      S.tview = 0;
+      document.body.dataset.pdfSharp = String(Date.now());
+    }
+    flushTiles();
+  }
+  return missing;
+}
+// 放大到超過圖磚最清楚一層（例如很密的圖用 150 dpi）：停下來 0.25 秒後，用 pdf.js 只畫看得到的那一塊（第一次才載入 pdf.js）
+function scheduleVector(n, s, x0, y0, x1, y1) {
+  if (NO_VECTOR) return; // 測試用（&vector=0）：只看圖磚
+  const d = S.tdet;
+  if (d && d.n === n && d.s >= s * 0.95 && d.x0 <= x0 && d.y0 <= y0 && d.x1 >= x1 && d.y1 >= y1) return; // 已經有
+  clearTimeout(S.tvecTimer);
+  S.tvecTimer = setTimeout(() => vectorDetail(n, s, x0, y0, x1, y1), 250);
+}
+async function vectorDetail(n, s, x0, y0, x1, y1) {
+  if (S.gesture || S.cur !== n || !S.tl) return;
+  const token = S.token;
+  const t0 = performance.now();
+  try {
+    if (!S.docReady) S.docReady = S.startDoc().then((doc) => { if (token === S.token) S.doc = doc; return doc; });
+    await S.docReady;
+    if (token !== S.token || S.cur !== n || !S.doc) return;
+    const page = await S.doc.getPage(n);
+    let sc = s;
+    const area = (x1 - x0) * (y1 - y0) * sc * sc;
+    if (area > CAPS.detail) sc *= Math.sqrt(CAPS.detail / area);
+    const c = document.createElement('canvas');
+    const keep = S.wm;
+    S.wm = ''; // 浮水印由 drawTiles 統一畫
+    try {
+      await draw(page, c, sc, x0 * sc, y0 * sc, Math.ceil((x1 - x0) * sc), Math.ceil((y1 - y0) * sc));
+    } finally {
+      S.wm = keep;
+    }
+    if (token !== S.token || S.cur !== n) { freeCanvas(c); return; }
+    if (S.tdet && S.tdet.canvas) freeCanvas(S.tdet.canvas);
+    S.tdet = { n, s: sc, x0, y0, x1, y1, canvas: c };
+    S.stats.detail++;
+    S.timing.lastVector = +(performance.now() - t0).toFixed(0);
+    document.body.dataset.pdfVector = String(Date.now());
+    requestDraw();
+  } catch (e) { /* 補畫不出來就留著圖磚 */ }
+}
+function needTile(n, k, i, prio) {
+  const key = tkey(n, k, i);
+  if (S.tcache.has(key) || S.tq.has(key)) return;
+  const pg = S.tl.pages[n - 1];
+  S.tq.set(key, { n, k, i, off: pg.offs[i], len: pg.lens[i], webp: pg.webp[i], prio, sent: false });
+}
+function flushTiles() {
+  if (!S.tl) return;
+  // 跟目前這頁無關、也不是前後頁縮圖的就不抓了
+  for (const [key, q] of S.tq) if (!q.sent && Math.abs(q.n - S.cur) > 1 && q.prio !== 2) S.tq.delete(key);
+  while (S.tinflight < TL.conc) {
+    const todo = [...S.tq.values()].filter((q) => !q.sent).sort((a, b) => a.prio - b.prio || (a.n === S.cur ? 0 : 1) - (b.n === S.cur ? 0 : 1) || a.off - b.off);
+    if (!todo.length) return;
+    // 同一頁、位置相近的合併成一個請求
+    const first = todo[0];
+    const group = [first];
+    let end = first.off + first.len;
+    for (const q of todo.slice(1).filter((q) => q.n === first.n).sort((a, b) => a.off - b.off)) {
+      if (q.off < first.off) continue;
+      if (q.off - end > TL.gap || q.off + q.len - first.off > TL.maxReq) continue;
+      group.push(q);
+      end = Math.max(end, q.off + q.len);
+    }
+    group.forEach((q) => { q.sent = true; });
+    S.tinflight++;
+    S.tstat.reqs++;
+    const token = S.token;
+    S.get(first.off, end - first.off).then(async (buf) => {
+      if (token !== S.token) return;
+      S.tstat.bytes += buf.byteLength;
+      await Promise.all(group.map(async (q) => {
+        try {
+          const blob = new Blob([buf.slice(q.off - first.off, q.off - first.off + q.len)], { type: q.webp ? 'image/webp' : 'image/png' });
+          const bmp = await createImageBitmap(blob);
+          if (token !== S.token) { bmp.close && bmp.close(); return; }
+          S.tcache.set(tkey(q.n, q.k, q.i), { bmp, px: bmp.width * bmp.height });
+          S.tcachePx += bmp.width * bmp.height;
+          S.tstat.tiles++;
+        } catch (e) { /* 壞掉的圖磚就算了 */ }
+        S.tq.delete(tkey(q.n, q.k, q.i));
+      }));
+      evictTiles();
+      requestDraw();
+      if (q0Thumb(group)) pumpTileThumbs();
+    }).catch(() => { group.forEach((q) => S.tq.delete(tkey(q.n, q.k, q.i))); })
+      .finally(() => { S.tinflight--; flushTiles(); });
+  }
+}
+function q0Thumb(group) { return group.some((q) => q.prio === 2); }
+function evictTiles() {
+  if (S.tcachePx <= TL.cachePx) return;
+  for (const [key, t] of S.tcache) { // 最久沒用的先丟（目前這頁的最小一層留著）
+    if (S.tcachePx <= TL.cachePx * 0.8) break;
+    const [n, k] = key.split('/').map(Number);
+    if (n === S.cur && k === S.tl.pages[n - 1].L - 1) continue;
+    if (t.bmp && t.bmp.close) t.bmp.close();
+    S.tcachePx -= t.px;
+    S.tcache.delete(key);
+  }
+}
+async function tileGo(n, first) {
+  n = Math.max(1, Math.min(S.n, Math.round(n) || 1));
+  const t0 = performance.now();
+  S.cur = n;
+  if (!first) { S.zoom = 1; S.panX = 0; S.panY = 0; }
+  $('#pdf-num').value = n;
+  $('#pdf-prev').disabled = n <= 1;
+  $('#pdf-next').disabled = n >= S.n;
+  $('#pdf-page').style.display = 'none';
+  S.tview = performance.now();
+  if (S.tdet) { if (S.tdet.canvas) freeCanvas(S.tdet.canvas); S.tdet = null; }
+  clampPan(S.sizes.get(n));
+  markThumb();
+  // 前後頁的最小一層先抓（翻頁馬上有東西）
+  for (const m of [n + 1, n - 1]) {
+    if (m >= 1 && m <= S.n) { const pg = S.tl.pages[m - 1]; const ci = pg.canon[pg.start[pg.L - 1]]; if (!pg.blank[ci]) needTile(m, pg.L - 1, ci, 1); }
+  }
+  drawTiles();
+  // 等到這頁至少畫出一層（第一次開檔：最小一層通常在第一段資料裡）
+  const pg = S.tl.pages[n - 1];
+  for (let i = 0; i < 400 && S.cur === n; i++) {
+    let any = false;
+    if (pg.blank[pg.canon[pg.start[pg.L - 1]]]) any = true;
+    for (let k = pg.L - 1; k >= 0 && !any; k--) if ([...S.tcache.keys()].some((key) => key.startsWith(`${n}/${k}/`))) any = true;
+    if (any) break;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  drawTiles();
+  S.timing.lastFlip = +(performance.now() - t0).toFixed(0);
+  document.body.dataset.pdfPage = String(n);
+  idle(() => pumpTileThumbs());
+}
+// 縮圖列：每頁最小一層（≤ 256 px）就是縮圖
+function pumpTileThumbs() {
+  if ($('#pdf-thumbs').hidden || !S.tl) return;
+  for (const n of S.thumbQ) {
+    const el = $('#pdf-thumbs').children[n - 1];
+    if (!el || el.dataset.done) continue;
+    const pg = S.tl.pages[n - 1];
+    const ci = pg.canon[pg.start[pg.L - 1]];
+    const key = tkey(n, pg.L - 1, ci);
+    const t = S.tcache.get(key);
+    if (pg.blank[ci]) { el.dataset.done = '1'; continue; }
+    if (t && t.bmp) {
+      const c = document.createElement('canvas');
+      c.width = t.bmp.width;
+      c.height = t.bmp.height;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(t.bmp, 0, 0);
+      if (S.wm) watermark(ctx, c.width, c.height, 0, 0, c.width, c.height);
+      c.className = 'pt-canvas';
+      el.querySelector('.pt-img').appendChild(c);
+      el.dataset.done = '1';
+    } else {
+      needTile(n, pg.L - 1, ci, 2);
+    }
+  }
+  flushTiles();
+}
+
 // ---------------------------------------------------------------- 初始化
 export function init(hooks) {
   ui = hooks;
@@ -784,10 +1097,24 @@ export function init(hooks) {
   });
   // 測試用
   window.skpvPdf = {
-    go, setZoom, info, get state() { return { cur: S.cur, n: S.n, zoom: +S.zoom.toFixed(3), fit: S.fit, panX: Math.round(S.panX), panY: Math.round(S.panY),
+    go, setZoom, info,
+    // 測試用：放大到「每 pt 幾個 CSS 像素」（2.5 ≈ 7 pt 的字 17 px 高，看得清楚）
+    zoomToCss(cssPerPt, cx, cy) { const sz = S.sizes.get(S.cur); setZoom(cssPerPt / fitScale(sz), cx, cy); }, get state() { return { cur: S.cur, n: S.n, zoom: +S.zoom.toFixed(3), fit: S.fit, panX: Math.round(S.panX), panY: Math.round(S.panY),
       bases: [...S.bases.keys()], detail: S.detail ? [S.detail.canvas.width, S.detail.canvas.height] : null, wm: S.wm, rendering: S.rendering }; },
     // 浮水印有沒有畫進 canvas：同一頁有／沒有浮水印各畫一次，比較像素
     async wmProbe() {
+      if (S.tl) { // 圖磚：同一個畫面有／沒有浮水印各畫一次
+        const a = document.createElement('canvas'), b = document.createElement('canvas');
+        a.width = b.width = S.tc.width;
+        a.height = b.height = S.tc.height;
+        drawTiles(a, true);
+        drawTiles(b, false);
+        const pa = a.getContext('2d').getImageData(0, 0, a.width, a.height).data, pb = b.getContext('2d').getImageData(0, 0, b.width, b.height).data;
+        let diff = 0;
+        for (let i = 0; i < pa.length; i += 4) if (Math.abs(pa[i] - pb[i]) + Math.abs(pa[i + 1] - pb[i + 1]) + Math.abs(pa[i + 2] - pb[i + 2]) > 12) diff++;
+        freeCanvas(a); freeCanvas(b);
+        return { on: !!S.wm, text: S.wm, diffRatio: +(diff / (pa.length / 4)).toFixed(4), tiles: true };
+      }
       if (S.pv && !S.pvFail) { // 預覽：同一張預覽有／沒有浮水印各畫一次
         const keep0 = S.wm;
         const a = await previewCanvas(S.cur);
@@ -816,6 +1143,13 @@ export function init(hooks) {
     },
     // 目前底圖中央的像素（測試用：確認畫出來的不是空白）
     sample() {
+      if (S.tl && S.tc) {
+        const c = S.tc, g = c.getContext('2d');
+        const d = g.getImageData(0, 0, c.width, c.height).data;
+        let dark = 0;
+        for (let i = 0; i < d.length; i += 16) if (d[i] + d[i + 1] + d[i + 2] < 200) dark++;
+        return { w: c.width, h: c.height, darkRatio: +(dark / (d.length / 16)).toFixed(4), tiles: true };
+      }
       const b = S.bases.get(S.cur);
       if (!b) return null;
       const c = b.canvas, g = c.getContext('2d');
