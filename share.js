@@ -7,6 +7,7 @@
 import { CONFIG } from './config.js';
 import { renderNotice, AGREE, DISAGREE, IP_SERVICE } from './notice.js';
 import { rangeFetcher } from './cloud.js';
+import { step } from './device.js';
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
@@ -127,8 +128,10 @@ export async function openShare(ui) {
   const t0 = performance.now();
   ui.showLoading('確認連結…');
   let c;
+  const tc = performance.now();
   try {
     c = await getJson(`${ep}?a=check&t=${encodeURIComponent(t)}`);
+    step('share check', tc);
   } catch (e) {
     return problem(ui, 'offline');
   }
@@ -144,15 +147,20 @@ export async function openShare(ui) {
       return;
     }
     writeAgreed(h, c.expires);
+    step('share notice agreed');
   } else {
     ui.toast(`分享代號 #${c.code}：開啟會記錄（你之前已同意聲明）`, 3500);
   }
   ui.showLoading('開啟中…');
   const env = deviceInfo(ui.device);
+  const ti = performance.now();
   const ip = await lookupIp();
+  step('share ip', ti);
   let o;
+  const to = performance.now();
   try {
     o = await getJson(ep, { method: 'POST', body: JSON.stringify({ a: 'open', t, ip, ...env }) });
+    step('share open (log)', to);
   } catch (e) {
     return problem(ui, 'offline');
   }
@@ -167,8 +175,10 @@ export async function openShare(ui) {
   const pre = { t0: performance.now(), abort: () => preCtrl.abort(),
     res: fetch(media, { headers: { Range: 'bytes=0-' }, cache: 'no-store', credentials: 'omit', signal: preCtrl.signal }) };
   pre.res.catch(() => {});
+  const tm = performance.now();
   try {
     meta = await getJson(`${base}/drive/v3/files/${encodeURIComponent(o.file)}?fields=size,mimeType&key=${encodeURIComponent(apiKey)}`);
+    step('drive meta', tm);
   } catch (e) {
     pre.abort();
     if (e.status === 404 || e.status === 403) return problem(ui, 'revoked');

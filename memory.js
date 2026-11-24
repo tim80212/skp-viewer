@@ -3,27 +3,12 @@
 // 179 張貼圖全部原尺寸要 2.8 GB 顯示記憶體（使用者回報開不了的模型，見 回報/v0.5.md）。
 import * as THREE from './lib/three.module.min.js';
 
-const UA = navigator.userAgent;
-const params = new URLSearchParams(location.search);
+import { DEVICE, TEX_BUDGET_MB, WARN_FILE_MB } from './device.js';
 
-// 裝置：phone／tablet／desktop（網址 ?device= 可以指定，測試用）
-export const DEVICE = (() => {
-  const forced = params.get('device');
-  if (['phone', 'tablet', 'desktop'].includes(forced)) return forced;
-  const coarse = matchMedia('(pointer: coarse)').matches;
-  const minSide = Math.min(screen.width, screen.height);
-  if (/iPhone|iPod/.test(UA) || /Android.+Mobile/.test(UA) || (coarse && minSide < 600)) return 'phone';
-  if (/iPad|Android/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) || coarse) return 'tablet';
-  return 'desktop';
-})();
+export { DEVICE, TEX_BUDGET_MB, WARN_FILE_MB };
 
-// 貼圖顯示記憶體預算（MB，含 mipmap）。手機要留給網格、程式本身和瀏覽器。
-export const TEX_BUDGET_MB = { phone: 160, tablet: 700, desktop: 3000 }[DEVICE];
 // 解碼單張圖片的上限（百萬像素）：瀏覽器不支援「解碼時縮小」時，比這個大的圖手機直接略過（用灰色代替），避免閃退
 const MAX_FULL_DECODE_MP = { phone: 24, tablet: 64, desktop: 400 }[DEVICE];
-// 手機上：檔案大於這個（MB）而且沒有手機版時，開之前先提醒
-export const WARN_FILE_MB = Number(params.get('warnmb')) || { phone: 200, tablet: 600, desktop: Infinity }[DEVICE]; // ?warnmb= 測試用
-
 // ---------- 讀 GLB 裡每張圖片的尺寸（只讀檔頭，不解碼） ----------
 function dims(bytes) {
   const b = bytes;

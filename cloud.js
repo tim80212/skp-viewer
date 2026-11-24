@@ -4,6 +4,7 @@
 import { CONFIG } from './config.js';
 import { Source } from './pdfdata.js';
 import * as offline from './offline.js';
+import { step } from './device.js';
 
 const SCOPE = 'https://www.googleapis.com/auth/drive.file openid email';
 const $ = (s) => document.querySelector(s);
@@ -152,13 +153,54 @@ function startPre(id, useKey) {
   return { res, t0, abort: () => ctrl.abort() };
 }
 
+// v0.10.0：這份文件每頁的圖（JPEG，lh3）的清單。index.html 一開頁就發了的話直接接手
+function startPreImg(id) {
+  const e = window.__skpvPreImg;
+  window.__skpvPreImg = null;
+  if (e && e.id === id && auth && e.tok === auth.token) return { res: e.res, t0: e.t0 };
+  if (!auth || !auth.token || params.get('img') === '0' || !/^[\w-]+$/.test(id)) return null;
+  const q = new URLSearchParams({ q: `appProperties has { key='skpvDoc' and value='${id}' } and trashed=false`,
+    fields: 'files(appProperties,thumbnailLink)', pageSize: '1000' });
+  const t0 = performance.now();
+  const res = fetch(`${DRIVE()}/files?${q}`, { headers: { Authorization: 'Bearer ' + auth.token }, cache: 'no-store', credentials: 'omit' });
+  res.catch(() => {});
+  return { res, t0 };
+}
+// 清單 → 這一版（pagesV）的圖，頁數要對得上；不對（上傳到一半、舊版）就不用，照舊走 PDF
+async function pageImages(pi, meta) {
+  const a = meta.appProperties || {};
+  if (!pi || !a.pagesV) return null;
+  try {
+    const r = await Promise.race([pi.res, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))]);
+    if (!r.ok) { step(`page images list ${r.status}`, pi.t0); return null; }
+    const files = ((await r.json()).files || []).filter((f) => (f.appProperties || {}).v === a.pagesV);
+    step('page images list', pi.t0);
+    const m = files.filter((f) => (f.appProperties || {}).b === 'm').length;
+    if (!m || m !== Number(a.pages)) return null;
+    return files;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function download(id, useKey) {
   const pre = startPre(id, useKey);
+  const preImg = useKey ? null : startPreImg(id);
   const dropPre = () => { if (pre) pre.abort(); };
   let meta;
+  let tm = performance.now();
+  const em = window.__skpvPreMeta; // v0.10.0：index.html 一開頁就發了的
+  window.__skpvPreMeta = null;
+  if (em && !useKey && em.id === id && auth && em.tok === auth.token) {
+    try {
+      const r = await em.res;
+      if (r.ok) { meta = await r.json(); tm = em.t0; }
+    } catch (e) { meta = null; }
+  }
   try {
-    meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,mimeType,appProperties,modifiedTime,md5Checksum,ownedByMe' }, useKey });
-  } catch (e) { dropPre(); throw e; }
+    if (!meta) meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,mimeType,appProperties,modifiedTime,md5Checksum,ownedByMe' }, useKey });
+    step(useKey ? 'drive meta (key)' : 'drive meta', tm);
+  } catch (e) { step(`drive meta failed ${e.status || ''}`, tm); dropPre(); throw e; }
   if (!isPdfMeta(meta)) dropPre();
   const mainName = meta.name;
   const mainReq = id;
@@ -192,7 +234,8 @@ async function download(id, useKey) {
     const keep = !useKey && meta.ownedByMe === true && id === mainReq
       ? { id, name: meta.name, modifiedTime: meta.modifiedTime || '', md5: meta.md5Checksum || '' } : null;
     if (id !== mainReq) dropPre(); // 改開手機版：先發的請求是原檔的
-    return { pdf: { size: Number(meta.size || 0), fetchRange: rf, open: rf.open, pre: id === mainReq ? pre : null }, name: meta.name, keep };
+    const images = id === mainReq ? await pageImages(preImg, meta) : null; // v0.10.0
+    return { pdf: { size: Number(meta.size || 0), fetchRange: rf, open: rf.open, pre: id === mainReq ? pre : null, images }, name: meta.name, keep };
   }
   ui.showLoading(`下載 ${meta.name}（${mb(Number(meta.size || 0))}）…`);
   const res = await api(`/files/${encodeURIComponent(id)}`, { query: { alt: 'media' }, raw: true, useKey });

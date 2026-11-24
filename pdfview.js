@@ -10,7 +10,7 @@
 // v0.7.1：桌面程式在 PDF 裡放了每頁的預覽圖（WebP，長邊 1600 px）和縮圖，檔頭 `%SKPV-PREVIEW 位置 長度` 指到索引。
 //   有預覽：先秀預覽（瀏覽器原生解圖、在背景執行緒，很快），pdf.js 同時在背景開檔；預覽夠清楚就不用 pdf.js 畫，
 //   不夠清楚（電腦高解析度螢幕）才在背景畫清晰版換上去；放大時照舊只補畫看得到的區域。縮圖列直接用縮圖，不用 pdf.js。
-import { DEVICE } from './memory.js';
+import { DEVICE, step } from './device.js';
 import { Source } from './pdfdata.js';
 import * as offline from './offline.js';
 
@@ -96,13 +96,20 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   source.on(() => netUi());
   source.startFull();
   netUi();
-  const first = await source.read(0, Math.min(source.size, FIRST_CHUNK));
-  if (token !== S.token) return null;
-  if (!isPdf(first)) throw new Error('這不是 PDF 檔。');
-  S.timing.headNav = Math.round(performance.now());
-  S.mode = source.state === 'done' ? 'data' : 'range';
-  S.head = first;
+  const firstP = source.read(0, Math.min(source.size, FIRST_CHUNK));
+  firstP.catch(() => {});
   S.get = (off, len) => source.read(off, len);
+  // v0.10.0：擁有者、有每頁的圖（桌面程式上傳到 Drive，網頁從 lh3 抓）：不用等 Drive 下載 PDF 就能看。PDF 照樣在背景下載（放大看向量、存在裝置上）
+  const imgTl = !share && src.images ? imagesTl(src.images) : null;
+  let first = null;
+  if (!imgTl) {
+    first = await firstP;
+    if (token !== S.token) return null;
+    if (!isPdf(first)) throw new Error('這不是 PDF 檔。');
+    S.timing.headNav = Math.round(performance.now());
+    S.head = first;
+  }
+  S.mode = source.state === 'done' ? 'data' : 'range';
   const makeParams = (P) => {
     const tr = new P.PDFDataRangeTransport(source.size, new Uint8Array(first.slice(0)));
     tr.requestDataRange = (begin, end) => {
@@ -115,18 +122,35 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     return { ...common, range: tr, length: source.size, rangeChunkSize: RANGE_CHUNK, disableAutoFetch: true, disableStream: true };
   };
   const startDoc = async () => {
+    if (!first) first = await firstP;
     const P = await getLib();
     if (token !== S.token) throw new Error('canceled');
     S.task = P.getDocument(makeParams(P));
     return S.task.promise;
   };
   // v0.7.1：先看檔案裡有沒有預覽（有的話不用等 pdf.js 開檔就能先顯示）
-  const firstBuf = S.head;
-  try { S.pv = await readIndex(firstBuf); } catch (e) { S.pv = null; }
-  S.timing.indexNav = Math.round(performance.now());
-  if (token !== S.token) return null;
+  if (!imgTl) {
+    try { S.pv = await readIndex(first); } catch (e) { S.pv = null; }
+    S.timing.indexNav = Math.round(performance.now());
+    if (token !== S.token) return null;
+  }
   let shareInfo = null;
-  if (S.pv && S.pv.v >= 2) { // v0.8.0：圖磚，不用 pdf.js（v0.9.0：v3＝第 1 頁和縮圖放前面）
+  if (imgTl) {
+    S.tl = imgTl;
+    S.n = imgTl.pages.length;
+    imgTl.pages.forEach((p, i) => S.sizes.set(i + 1, { w: p.w, h: p.h }));
+    S.docReady = null;
+    S.startDoc = startDoc;
+    // 背景：PDF 的檔頭到了就讀圖磚索引（lh3 的圖抓不到時改用 PDF 的圖磚）
+    firstP.then(async (buf) => {
+      if (token !== S.token || !isPdf(buf)) return;
+      S.head = buf;
+      S.timing.headNav = Math.round(performance.now());
+      const js = await readIndex(buf);
+      if (token === S.token && js && js.v >= 2) S.pdfTl = tilesFrom(js);
+      if (S.imgFail && S.pdfTl) usePdfTiles('lh3 failed');
+    }).catch(() => {});
+  } else if (S.pv && S.pv.v >= 2) { // v0.8.0：圖磚，不用 pdf.js（v0.9.0：v3＝第 1 頁和縮圖放前面）
     S.tl = tilesFrom(S.pv);
     S.pv = null;
     shareInfo = S.tl.share || null;
@@ -179,9 +203,10 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.timing.firstPage = +(performance.now() - t0).toFixed(0);
   S.timing.bytesAtFirstPage = source.received;
   S.timing.firstPageNav = Math.round(performance.now()); // 從打開網頁算起
+  step('pdf first page');
   window.__skpvPdfTiming = S.timing;
   if (S.keep) keepWhenDone(token);
-  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl, full: source.state };
+  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl, images: !!(S.tl && S.tl.images), full: source.state };
 }
 
 // 分享副本（第 2 層）：檔案裡寫著代號和到期時間，過期就不顯示（存了檔、換個方式打開也一樣）
@@ -266,6 +291,8 @@ export function close() {
   S.tcachePx = 0;
   S.tq.clear();
   S.tl = null;
+  S.pdfTl = null;
+  S.imgFail = 0;
   if (S.tdet) { if (S.tdet.canvas) freeCanvas(S.tdet.canvas); S.tdet = null; }
   clearTimeout(S.tvecTimer);
   if (S.tc) { freeCanvas(S.tc); S.tc = null; }
@@ -276,6 +303,7 @@ export function info() {
   const net = S.src ? S.src.stats() : null;
   return { name: S.name, pages: S.n, bytes: S.bytes, mode: S.mode, fetched: net ? net.received : S.fetched, requests: net ? net.requests : S.requests,
     share: S.share, timing: S.timing, preview: !!S.pv && !S.pvFail, stats: { ...S.stats }, docReady: !!S.doc, tiles: !!S.tl,
+    images: !!(S.tl && S.tl.images), imgFail: S.imgFail || 0,
     tileStats: { ...S.tstat, cached: S.tcache.size, net }, pdfjsLoaded: !!pdfjs, keep: S.keep ? { saved: !!S.keepSaved, cached: !!S.keep.cached } : null };
 }
 
@@ -362,7 +390,7 @@ function debugUi() {
 }
 function speedLog() {
   return JSON.stringify({ app: 'skpv-pdf', at: new Date().toISOString(), device: DEVICE, ua: navigator.userAgent, name: S.share ? `#${S.share.code}` : S.name,
-    pages: S.n, timing: S.timing, net: S.src ? S.src.stats() : null, tiles: { ...S.tstat } });
+    pages: S.n, timing: S.timing, steps: window.__skpvSteps || [], net: S.src ? S.src.stats() : null, tiles: { ...S.tstat } });
 }
 
 // ---------------------------------------------------------------- 尺寸、版面
@@ -884,7 +912,7 @@ function tilesFrom(js) {
     const raw = Uint8Array.from(atob(p.t), (c) => c.charCodeAt(0));
     const u = new Uint32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
     const L = p.d.length;
-    const grid = p.d.map(([w, h]) => ({ w, h, cols: Math.ceil(w / T), rows: Math.ceil(h / T) }));
+    const grid = p.d.map(([w, h]) => ({ w, h, cols: Math.ceil(w / T), rows: Math.ceil(h / T), tw: T, th: T }));
     const start = new Array(L);
     let k0 = 0;
     for (let k = L - 1; k >= 0; k--) { start[k] = k0; k0 += grid[k].cols * grid[k].rows; } // 檔案裡從最小一層放起
@@ -961,9 +989,9 @@ function drawTiles(c = null, wm = true) {
   const want = levelFor(pg, s);
   let missing = 0;
   for (let k = pg.L - 1; k >= want; k--) { // 粗的先畫，細的蓋上去
-    const g = pg.grid[k], f = g.w / pg.w, T = S.tl.T;
-    const cx0 = Math.max(0, Math.floor(x0 * f / T)), cx1 = Math.min(g.cols - 1, Math.floor((x1 * f - 1e-6) / T));
-    const cy0 = Math.max(0, Math.floor(y0 * f / T)), cy1 = Math.min(g.rows - 1, Math.floor((y1 * f - 1e-6) / T));
+    const g = pg.grid[k], f = g.w / pg.w, TW = g.tw, TH = g.th;
+    const cx0 = Math.max(0, Math.floor(x0 * f / TW)), cx1 = Math.min(g.cols - 1, Math.floor((x1 * f - 1e-6) / TW));
+    const cy0 = Math.max(0, Math.floor(y0 * f / TH)), cy1 = Math.min(g.rows - 1, Math.floor((y1 * f - 1e-6) / TH));
     for (let cy = cy0; cy <= cy1; cy++) {
       for (let cx = cx0; cx <= cx1; cx++) {
         const i = pg.canon[pg.start[k] + cy * g.cols + cx];
@@ -971,7 +999,8 @@ function drawTiles(c = null, wm = true) {
         const t = S.tcache.get(tkey(n, k, i));
         if (t && t.bmp) {
           S.tcache.delete(tkey(n, k, i)); S.tcache.set(tkey(n, k, i), t); // 最近用過
-          ctx.drawImage(t.bmp, ox + (cx * T) / f * s, oy + (cy * T) / f * s, t.bmp.width / f * s, t.bmp.height / f * s);
+          const tw = Math.min(TW, g.w - cx * TW), th = Math.min(TH, g.h - cy * TH); // 這塊應該的大小（lh3 給的圖大小可能不一樣）
+          ctx.drawImage(t.bmp, ox + (cx * TW) / f * s, oy + (cy * TH) / f * s, tw / f * s, th / f * s);
         } else if (k === want || k === pg.L - 1) {
           if (k === want) missing++;
           needTile(n, k, i, k === want ? 0 : 1);
@@ -989,7 +1018,7 @@ function drawTiles(c = null, wm = true) {
     if (want === 0 && s > (pg.grid[0].w / pg.w) * 1.25) scheduleVector(n, s, x0, y0, x1, y1);
     if (!missing && S.tview) { // 這次的畫面已經全部清楚
       S.timing.lastSharp = +(performance.now() - S.tview).toFixed(0);
-      if (S.timing.firstSharp == null && S.t0) { S.timing.firstSharp = +(performance.now() - S.t0).toFixed(0); S.timing.firstSharpNav = Math.round(performance.now()); }
+      if (S.timing.firstSharp == null && S.t0) { S.timing.firstSharp = +(performance.now() - S.t0).toFixed(0); S.timing.firstSharpNav = Math.round(performance.now()); step('pdf first sharp'); }
       S.tview = 0;
       document.body.dataset.pdfSharp = String(Date.now());
     }
@@ -1038,7 +1067,8 @@ function needTile(n, k, i, prio) {
   const key = tkey(n, k, i);
   if (S.tcache.has(key) || S.tq.has(key)) return;
   const pg = S.tl.pages[n - 1];
-  S.tq.set(key, { n, k, i, off: pg.offs[i], len: pg.lens[i], webp: pg.webp[i], prio, sent: false });
+  S.tq.set(key, pg.urls ? { n, k, i, url: pg.urls[i], off: i, len: 0, prio, sent: false }
+    : { n, k, i, off: pg.offs[i], len: pg.lens[i], webp: pg.webp[i], prio, sent: false });
 }
 function flushTiles() {
   if (!S.tl) return;
@@ -1047,8 +1077,9 @@ function flushTiles() {
   while (S.tinflight < TL.conc) {
     const todo = [...S.tq.values()].filter((q) => !q.sent).sort((a, b) => a.prio - b.prio || (a.n === S.cur ? 0 : 1) - (b.n === S.cur ? 0 : 1) || a.off - b.off);
     if (!todo.length) return;
-    // 同一頁、位置相近的合併成一個請求
     const first = todo[0];
+    if (first.url) { fetchImage(first); continue; } // v0.10.0：每頁的圖（lh3），一張一個請求
+    // 同一頁、位置相近的合併成一個請求
     const group = [first];
     let end = first.off + first.len;
     for (const q of todo.slice(1).filter((q) => q.n === first.n).sort((a, b) => a.off - b.off)) {
@@ -1089,6 +1120,93 @@ function flushTiles() {
     }).catch(() => { group.forEach((q) => S.tq.delete(tkey(q.n, q.k, q.i))); })
       .finally(() => { S.tinflight--; flushTiles(); });
   }
+}
+// ---------------------------------------------------------------- 每頁的圖（v0.10.0）
+// 桌面程式把每頁存成 JPEG 放在 Drive（m＝長邊 1600 的整頁、f＝150 dpi 全尺寸，大頁切塊），網頁用縮圖網址（lh3）抓：
+// lh3 的回應很快（主管實測 0.3～0.9 秒），Drive 下載 PDF 要先等 5～10 秒。
+// 做成跟圖磚一樣的結構（3 層：0＝全尺寸切塊、1＝中等整頁、2＝縮圖 =s240），畫法、快取、縮圖列都共用。
+const lh3 = (link, sz) => link.replace(/=[swh]\d+[^/=]*$/, '') + '=' + sz;
+function imagesTl(files) {
+  const by = new Map();
+  for (const f of files || []) {
+    const a = f.appProperties || {}, n = Number(a.p);
+    if (!n || !a.b || !f.thumbnailLink) continue;
+    if (!by.has(n)) by.set(n, {});
+    by.get(n)[a.b] = { link: f.thumbnailLink, a };
+  }
+  const N = by.size;
+  if (!N) return null;
+  const pages = [];
+  for (let n = 1; n <= N; n++) {
+    const e = by.get(n);
+    if (!e || !e.m) return null;
+    const a = e.m.a;
+    const [pw, ph] = String(a.pt).split(',').map(Number), [W, H] = String(a.px).split(',').map(Number);
+    const [cols, rows] = String(a.g).split(',').map(Number), mx = String(a.x).split(',').map(Number);
+    if (!(pw > 0 && ph > 0 && W > 0 && H > 0 && cols > 0 && rows > 0 && mx[2] > 0)) return null;
+    const mw = mx[2], mh = mx[3], ts = 240 / Math.max(mw, mh);
+    const sw = Math.max(1, Math.round(mw * ts)), sh = Math.max(1, Math.round(mh * ts));
+    const grid = [{ w: W, h: H, cols, rows, tw: Math.ceil(W / cols), th: Math.ceil(H / rows) },
+      { w: mw, h: mh, cols: 1, rows: 1, tw: mw, th: mh },
+      { w: sw, h: sh, cols: 1, rows: 1, tw: sw, th: sh }];
+    const start = [2, 1, 0], total = 2 + cols * rows;
+    const urls = new Array(total);
+    urls[0] = lh3(e.m.link, 's240');
+    urls[1] = lh3(e.m.link, 's0');
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const b = e[`${r}_${c}`];
+        if (!b) return null;
+        urls[2 + r * cols + c] = lh3(b.link, 's0');
+      }
+    }
+    pages.push({ w: pw, h: ph, L: 3, grid, start, urls, canon: Uint32Array.from({ length: total }, (_, i) => i), blank: new Uint8Array(total),
+      blocks: [], blk: () => 0 });
+  }
+  return { T: 512, pages, share: null, dpi: 150, images: true };
+}
+function fetchImage(q) {
+  q.sent = true;
+  S.tinflight++;
+  S.tstat.reqs++;
+  const token = S.token, key = tkey(q.n, q.k, q.i), t0 = performance.now();
+  fetch(q.url, { cache: 'no-store', credentials: 'omit' }).then((r) => {
+    if (!r.ok) throw Object.assign(new Error(`lh3 ${r.status}`), { status: r.status });
+    return r.blob();
+  }).then(async (blob) => {
+    if (token !== S.token) return;
+    S.tstat.bytes += blob.size;
+    const bmp = await createImageBitmap(blob);
+    if (token !== S.token) { if (bmp.close) bmp.close(); return; }
+    S.tcache.set(key, { bmp, px: bmp.width * bmp.height });
+    S.tcachePx += bmp.width * bmp.height;
+    S.tstat.tiles++;
+    if (!S.tstat.img) { S.tstat.img = 1; step('lh3 first image', t0); }
+    S.tq.delete(key);
+    evictTiles();
+    requestDraw();
+    if (q.prio === 2) pumpTileThumbs();
+  }).catch((e) => {
+    S.tq.delete(key);
+    if (token !== S.token) return;
+    S.imgFail = (S.imgFail || 0) + 1;
+    step(`lh3 failed ${e.status || ''}`.trim(), t0);
+    if (S.pdfTl) usePdfTiles('lh3 failed'); // PDF 的圖磚到了：改用 PDF
+  }).finally(() => { S.tinflight--; flushTiles(); });
+}
+// 每頁的圖抓不到（網址過期、網路）：改用 PDF 裡的圖磚（背景下載到了才有）
+function usePdfTiles(why) {
+  if (!S.pdfTl || !S.tl || !S.tl.images) return;
+  for (const t of S.tcache.values()) if (t.bmp && t.bmp.close) t.bmp.close();
+  S.tcache.clear();
+  S.tcachePx = 0;
+  S.tq.clear();
+  S.tl = S.pdfTl;
+  S.tl.pages.forEach((p, i) => S.sizes.set(i + 1, { w: p.w, h: p.h }));
+  step(`switch to pdf tiles (${why})`);
+  for (const el of $('#pdf-thumbs').children) delete el.dataset.done;
+  requestDraw();
+  pumpTileThumbs();
 }
 function q0Thumb(group) { return group.some((q) => q.prio === 2); }
 function evictTiles() {

@@ -19,7 +19,7 @@
 (function () {
   try {
     var q = new URLSearchParams(location.search), id = q.get('m');
-    if (!id || q.get('pre') === '0' || !window.AbortController || !window.fetch) return;
+    if (!id || !/^[\w-]+$/.test(id) || q.get('pre') === '0' || !window.AbortController || !window.fetch) return;
     var local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
     var base = 'https://www.googleapis.com', tok = null;
     if (local && /^http:\/\/127\.0\.0\.1:\d+$/.test(q.get('gbase') || '')) { base = q.get('gbase'); tok = q.get('gtoken'); }
@@ -32,13 +32,26 @@
     var pre = { id: id, tok: tok, res: res, t0: t0, abort: function () { ctrl.abort(); } };
     window.__skpvPre = pre;
     setTimeout(function () { if (window.__skpvPre === pre) { pre.abort(); window.__skpvPre = null; } }, 30000);
+    // v0.10.0：檔案資料也一開頁就讀（以前等程式載入完才讀，晚 0.5～1 秒）
+    var meta = fetch(base + '/drive/v3/files/' + encodeURIComponent(id) + '?fields=' + encodeURIComponent('id,name,size,mimeType,appProperties,modifiedTime,md5Checksum,ownedByMe'),
+      { headers: { Authorization: 'Bearer ' + tok }, cache: 'no-store', credentials: 'omit' });
+    meta.catch(function () {});
+    window.__skpvPreMeta = { id: id, tok: tok, res: meta, t0: performance.now() };
+    // v0.10.0：同時列出這份文件每頁的圖（桌面程式上傳的 JPEG，網頁從縮圖網址 lh3 抓，不用等 Drive 下載 PDF）
+    if (q.get('img') !== '0') {
+      var qs = 'q=' + encodeURIComponent("appProperties has { key='skpvDoc' and value='" + id + "' } and trashed=false")
+        + '&fields=' + encodeURIComponent('files(appProperties,thumbnailLink)') + '&pageSize=1000';
+      var img = fetch(base + '/drive/v3/files?' + qs, { headers: { Authorization: 'Bearer ' + tok }, cache: 'no-store', credentials: 'omit' });
+      img.catch(function () {});
+      window.__skpvPreImg = { id: id, tok: tok, res: img, t0: performance.now() };
+    }
   } catch (e) { /* 略過：照一般的流程 */ }
 })();
 </script>
 <!-- v0.9.0：程式一次全部開始下載（不用等 app.js 解析完才知道要抓 pdfview.js、pdfdata.js…），開檔的請求早一點發出去 -->
 <link rel="modulepreload" href="app.js"><link rel="modulepreload" href="cloud.js"><link rel="modulepreload" href="config.js">
 <link rel="modulepreload" href="pdfview.js"><link rel="modulepreload" href="pdfdata.js"><link rel="modulepreload" href="offline.js">
-<link rel="modulepreload" href="memory.js"><link rel="modulepreload" href="share.js"><link rel="modulepreload" href="notice.js">
+<link rel="modulepreload" href="device.js"><link rel="modulepreload" href="share.js"><link rel="modulepreload" href="notice.js">
 </head>
 <body>
 <div id="app" class="empty">
