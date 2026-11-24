@@ -403,6 +403,7 @@ async function refresh() {
     } });
     files = res.files || [];
     await renderList();
+    autoDevice(); // v0.10.2：現場離線包
   } catch (e) {
     if (e.status === 401) { renderSignIn(); return; }
     renderMsg(e.status ? e.message : '連不上網路。下面是存在這台裝置上的文件（沒有網路也能開）。');
@@ -441,7 +442,7 @@ function devButtons(f) {
   if (r && offline.sameVersion(r, f)) return '<span class="mdev">✓ 已存在這台裝置</span><button class="btn" data-act="undev">從這台裝置清除</button>';
   return `<button class="btn" data-act="dev">${r ? '更新這台裝置上的版本' : '下載到這台裝置（現場離線用）'}</button>`;
 }
-async function saveToDevice(id) {
+async function saveToDevice(id, quiet = false) {
   const f = files.find((x) => x.id === id);
   if (!f || saving.has(id)) return;
   if (!signedIn()) await signIn();
@@ -461,14 +462,55 @@ async function saveToDevice(id) {
   try {
     if (src.state !== 'done') throw new Error('下載中斷');
     await offline.put({ id, name: f.name, size: src.size, modifiedTime: f.modifiedTime || '', md5: f.md5Checksum || '', blob: src.blob() });
-    ui.toast(`「${f.name.replace(/\.pdf$/i, '')}」已存在這台裝置：現場沒有網路也能開`, 3500);
+    if (!quiet) ui.toast(`「${f.name.replace(/\.pdf$/i, '')}」已存在這台裝置：現場沒有網路也能開`, 3500);
   } catch (e) {
-    ui.toast(e.message === '下載中斷' ? '下載中斷了，請再試一次' : '這台裝置的儲存空間不夠，沒辦法存下來', 4000);
+    if (!quiet) ui.toast(e.message === '下載中斷' ? '下載中斷了，請再試一次' : '這台裝置的儲存空間不夠，沒辦法存下來', 4000);
+    throw e;
   } finally {
     src.close();
     saving.delete(id);
     await renderList();
   }
+}
+
+// ---------- 現場離線包（v0.10.2，擁有者）：打開「我的檔案」時，自動把最近更新的幾份 PDF 存在這台裝置 ----------
+// 在辦公室（Wi‑Fi）先開一次清單，到現場就算沒網路、或網路很慢，也能馬上開。用行動網路（瀏覽器說得出來的話）不自動下載。
+const AUTO_N = 5;
+const autoOn = () => { try { return localStorage.getItem('skpv-autodev') === '1'; } catch (e) { return false; } };
+let autoRunning = false;
+async function autoDevice() {
+  if (autoRunning || !autoOn() || !files.length) return;
+  const c = navigator.connection;
+  if (c && (c.saveData || c.type === 'cellular')) { ui.toast('現場離線包：現在是行動網路，等連上 Wi‑Fi 再自動下載', 3500); return; }
+  autoRunning = true;
+  const budget = ({ phone: 300, tablet: 800, desktop: 2000 }[ui.device] || 800) * 1048576;
+  let n = 0;
+  try {
+    await loadDev();
+    let used = [...dev.values()].reduce((t, r) => t + (r.bytes || 0), 0);
+    const want = files.filter((f) => isPdfMeta(f) && f.ownedByMe !== false).slice(0, AUTO_N); // 清單本來就是最近更新的在前面
+    for (const f of want) {
+      const r = dev.get(f.id);
+      if (r && offline.sameVersion(r, f)) continue;
+      const size = Number(f.size || 0);
+      if (used - (r ? r.bytes || 0 : 0) + size > budget) break;
+      if (navigator.storage && navigator.storage.estimate) {
+        const est = await navigator.storage.estimate();
+        if (est.quota && est.usage + size > est.quota * 0.8) break;
+      }
+      if (!autoOn()) break;
+      try { await saveToDevice(f.id, true); n++; used += size; } catch (e) { break; }
+      await loadDev();
+    }
+  } finally {
+    autoRunning = false;
+    window.__skpvAutoDev = { done: true, saved: n };
+    if (n) ui.toast(`現場離線包：${n} 份文件已存在這台裝置（現場沒有網路也能開）`, 3500);
+  }
+}
+function autoRow() {
+  return `<label class="autodev small"><input type="checkbox" id="autodev"${autoOn() ? ' checked' : ''}>
+    現場離線包：打開「我的檔案」時，自動把最近更新的 ${AUTO_N} 份文件存在這台裝置（現場沒網路也能開；用行動網路時不下載）</label>`;
 }
 
 function renderMsg(text) {
@@ -492,7 +534,7 @@ async function renderList() {
     renderDevice();
     return;
   }
-  $('#cloud-list').innerHTML = files.map((f) => {
+  $('#cloud-list').innerHTML = autoRow() + files.map((f) => {
     const shared = (f.permissionIds || []).includes('anyoneWithLink');
     const t = new Date(f.modifiedTime);
     const when = isNaN(t) ? '' : `${t.getFullYear()}/${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
@@ -556,6 +598,11 @@ export function init(hooks) {
   $('#cloud-close').onclick = () => { $('#cloud').hidden = true; };
   $('#locked-close').onclick = () => { $('#locked').hidden = true; };
   $('#cloud-logout').onclick = () => { signOut(); files = []; renderSignIn(); };
+  $('#cloud-list').addEventListener('change', (e) => { // v0.10.2：現場離線包
+    if (e.target.id !== 'autodev') return;
+    try { localStorage.setItem('skpv-autodev', e.target.checked ? '1' : '0'); } catch (err) { /* 略過 */ }
+    if (e.target.checked) autoDevice();
+  });
   $('#cloud-list').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
@@ -568,7 +615,7 @@ export function init(hooks) {
       if (b.dataset.act === 'open') await openCloud(id);
       else if (b.dataset.act === 'share') await shareFile(id);
       else if (b.dataset.act === 'unshare') await unshareFile(id);
-      else if (b.dataset.act === 'dev') await saveToDevice(id);
+      else if (b.dataset.act === 'dev') await saveToDevice(id).catch(() => {}); // 失敗的提示 saveToDevice 已經顯示了
       else if (b.dataset.act === 'undev') { await offline.del(id); ui.toast('已從這台裝置清除', 2500); if (files.length) await renderList(); else await renderDevice(); }
     } catch (err) { ui.toast(err.message, 4000); }
   });

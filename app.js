@@ -6,7 +6,7 @@ import * as mem from './device.js';
 import * as share from './share.js';
 import * as pdfv from './pdfview.js';
 
-const APP_VERSION = '0.10.0';
+const APP_VERSION = '0.10.2';
 window.__skpvVersion = APP_VERSION; // 測試用（Service Worker 換版）
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -24,6 +24,7 @@ function load3d() {
   return m3P;
 }
 function leavePdf() {
+  app.classList.remove('chrome-off');
   if (app.classList.contains('pdf')) { pdfv.close(); app.classList.remove('pdf'); pdfInfo = null; document.body.classList.remove('shared'); }
 }
 // ---------- 讀檔 ----------
@@ -199,7 +200,13 @@ function updateMeta() {
   $('#info-list').innerHTML = mi.rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('');
 }
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-$('#info-btn').addEventListener('click', () => { if (fileInfo.pdf) updateMeta(); $('#info').hidden = false; });
+$('#info-btn').addEventListener('click', () => { if (fileInfo.pdf) updateMeta(); uiModeText(); $('#info').hidden = false; });
+// v0.10.2：版面（觸控看圖模式／電腦版）：自動判斷，也可以在這裡切換（記在這台裝置，重新整理後生效）
+function uiModeText() {
+  $('#ui-mode').textContent = mem.TOUCH_UI ? '觸控看圖模式（手機、平板）' : '電腦版';
+  $('#ui-toggle').textContent = mem.TOUCH_UI ? '改用電腦版' : '改用觸控看圖模式';
+}
+$('#ui-toggle').addEventListener('click', () => { mem.setUiMode(mem.TOUCH_UI ? 'desktop' : 'touch'); location.reload(); });
 $('#info-close').addEventListener('click', () => { $('#info').hidden = true; });
 $('#info').addEventListener('click', (e) => { if (e.target.id === 'info') $('#info').hidden = true; });
 

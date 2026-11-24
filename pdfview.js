@@ -10,7 +10,7 @@
 // v0.7.1：桌面程式在 PDF 裡放了每頁的預覽圖（WebP，長邊 1600 px）和縮圖，檔頭 `%SKPV-PREVIEW 位置 長度` 指到索引。
 //   有預覽：先秀預覽（瀏覽器原生解圖、在背景執行緒，很快），pdf.js 同時在背景開檔；預覽夠清楚就不用 pdf.js 畫，
 //   不夠清楚（電腦高解析度螢幕）才在背景畫清晰版換上去；放大時照舊只補畫看得到的區域。縮圖列直接用縮圖，不用 pdf.js。
-import { DEVICE, step } from './device.js';
+import { DEVICE, TOUCH_UI, step } from './device.js';
 import { Source } from './pdfdata.js';
 import * as offline from './offline.js';
 
@@ -194,7 +194,8 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.open = true;
   netUi();
   S.cur = 1;
-  S.fit = 'width';
+  S.fit = TOUCH_UI && innerWidth > innerHeight ? 'page' : 'width'; // v0.10.2：觸控、橫向一開始整頁
+  $('#pdf-fit').textContent = S.fit === 'width' ? '整頁' : '適合寬度';
   S.zoom = 1;
   $('#pdf-count').textContent = S.n;
   buildThumbs();
@@ -410,6 +411,9 @@ function viewRect() {
 const DPR = () => Math.min(window.devicePixelRatio || 1, DEVICE === 'phone' ? 3 : 2);
 function fitScale(sz) {
   const { W, H } = viewRect();
+  return fitScaleWH(sz, W, H);
+}
+function fitScaleWH(sz, W, H) {
   const m = 8;
   return S.fit === 'width' ? (W - m * 2) / sz.w : Math.min((W - m * 2) / sz.w, (H - m * 2) / sz.h);
 }
@@ -692,7 +696,7 @@ function setFit(f) {
 function setupGestures() {
   const v = $('#pdf-view');
   const pts = new Map();
-  let start = null, lastTap = 0, swipe = null;
+  let start = null, lastTap = 0, swipe = null, tapT = 0;
   v.addEventListener('pointerdown', (e) => {
     v.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -701,6 +705,7 @@ function setupGestures() {
       swipe = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY, t: performance.now() };
       const now = performance.now();
       if (now - lastTap < 300) { // 點兩下：放大 2.5 倍／回到適合
+        clearTimeout(tapT); // 不是單擊
         setZoom(S.zoom > 1.05 ? 1 : 2.5, e.clientX - r.left, e.clientY - r.top);
         lastTap = 0;
         swipe = null;
@@ -746,6 +751,11 @@ function setupGestures() {
       return;
     }
     if (pts.size) return;
+    // v0.10.2 觸控模式：單擊（沒移動、很快放開）＝收起／顯示工具（等 0.3 秒確定不是點兩下）
+    if (TOUCH_UI && swipe && !S.gesture && Math.abs(e.clientX - swipe.x) + Math.abs(e.clientY - swipe.y) < 10 && performance.now() - swipe.t < 300) {
+      clearTimeout(tapT);
+      tapT = setTimeout(() => { if (performance.now() - lastTap >= 290) toggleChrome(); }, 310);
+    }
     // 沒放大、左右滑超過 60 px：翻頁
     if (swipe && S.zoom <= 1.02) {
       const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
@@ -784,7 +794,27 @@ function setupGestures() {
       scheduleDetail();
     }
   }, { passive: false });
-  window.addEventListener('resize', () => { if (S.open && S.tl) { requestDraw(); return; } if (S.open) { for (const b of S.bases.values()) freeCanvas(b.canvas); S.bases.clear(); dropDetail(); go(S.cur, true); } });
+  // v0.10.2：畫面大小改變（轉方向、收起工具、視窗大小）：畫面中心看的那一點不變（以前會回到頁首）
+  let lastVR = null;
+  const onResize = () => {
+    const vr = viewRect();
+    if (lastVR && lastVR.W === vr.W && lastVR.H === vr.H) return;
+    const sz = S.open && S.sizes.get(S.cur);
+    if (sz && lastVR && S.tl) {
+      const s0 = fitScaleWH(sz, lastVR.W, lastVR.H) * S.zoom, s1 = fitScale(sz) * S.zoom;
+      const px = (lastVR.W / 2 - S.panX) / s0, py = (lastVR.H / 2 - S.panY) / s0;
+      S.panX = vr.W / 2 - px * s1;
+      S.panY = vr.H / 2 - py * s1;
+    }
+    lastVR = vr;
+    if (!S.open) return;
+    if (S.tl) { layout(); return; }
+    for (const b of S.bases.values()) freeCanvas(b.canvas);
+    S.bases.clear();
+    dropDetail();
+    go(S.cur, true);
+  };
+  if (window.ResizeObserver) new ResizeObserver(onResize).observe(v); else window.addEventListener('resize', onResize);
   window.addEventListener('keydown', (e) => {
     if (!S.open || e.target.tagName === 'INPUT') return;
     const k = e.key;
@@ -1223,6 +1253,7 @@ function evictTiles() {
 async function tileGo(n, first) {
   n = Math.max(1, Math.min(S.n, Math.round(n) || 1));
   const t0 = performance.now();
+  if (n !== S.cur || first) badge(n);
   S.cur = n;
   if (!first) { S.zoom = 1; S.panX = 0; S.panY = 0; }
   $('#pdf-num').value = n;
@@ -1251,6 +1282,23 @@ async function tileGo(n, first) {
   S.timing.lastFlip = +(performance.now() - t0).toFixed(0);
   document.body.dataset.pdfPage = String(n);
   idle(() => pumpTileThumbs());
+}
+// v0.10.2：翻頁時中間上方顯示「12 / 94」1 秒（觸控模式；上方列收起來的時候特別需要）
+function badge(n) {
+  const b = $('#pdf-badge');
+  if (!b || !TOUCH_UI || !S.n) return;
+  b.textContent = `${n} / ${S.n}`;
+  b.hidden = false;
+  b.classList.remove('fade');
+  clearTimeout(S.badgeT);
+  S.badgeT = setTimeout(() => { b.classList.add('fade'); S.badgeT = setTimeout(() => { b.hidden = true; }, 350); }, 1100);
+}
+// v0.10.2：點一下畫面收起／顯示上方列和工具（觸控模式）
+export function toggleChrome(force) {
+  const app = $('#app');
+  const off = force != null ? !!force : !app.classList.contains('chrome-off');
+  app.classList.toggle('chrome-off', off);
+  document.body.dataset.chrome = off ? 'off' : 'on';
 }
 // 縮圖列：每頁最小一層（≤ 256 px）就是縮圖
 function pumpTileThumbs() {
@@ -1343,6 +1391,7 @@ export function init(hooks) {
   window.skpvPdf = {
     go, setZoom, info, speedLog: () => JSON.parse(speedLog()), net: () => (S.src ? S.src.stats() : null),
     // 測試用：放大到「每 pt 幾個 CSS 像素」（2.5 ≈ 7 pt 的字 17 px 高，看得清楚）
+    cssPerPt() { const sz = S.sizes.get(S.cur); return sz ? fitScale(sz) * S.zoom : 0; }, // 測試用（v0.10.2）
     zoomToCss(cssPerPt, cx, cy) { const sz = S.sizes.get(S.cur); setZoom(cssPerPt / fitScale(sz), cx, cy); }, get state() { return { cur: S.cur, n: S.n, zoom: +S.zoom.toFixed(3), fit: S.fit, panX: Math.round(S.panX), panY: Math.round(S.panY),
       bases: [...S.bases.keys()], detail: S.detail ? [S.detail.canvas.width, S.detail.canvas.height] : null, wm: S.wm, rendering: S.rendering }; },
     // 浮水印有沒有畫進 canvas：同一頁有／沒有浮水印各畫一次，比較像素

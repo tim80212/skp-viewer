@@ -83,7 +83,7 @@
 
   <!-- PDF 檢視（v0.7.0）：開 PDF 時取代上面的 3D 畫面、場景列、工具列 -->
   <div id="pdf-view" aria-label="PDF 頁面"><div id="pdf-page"></div>
-    <button id="pdf-net" class="pdf-net" hidden></button><pre id="pdf-debug" hidden></pre></div>
+    <button id="pdf-net" class="pdf-net" hidden></button><pre id="pdf-debug" hidden></pre><div id="pdf-badge" hidden></div></div>
   <nav id="pdf-thumbs" aria-label="頁面縮圖" hidden></nav>
   <footer id="pdf-tools">
     <button class="tool" id="pdf-prev" aria-label="上一頁"><span class="ic">◀</span><span>上一頁</span></button>
@@ -146,6 +146,8 @@
         <li>左右滑動或按「上一頁／下一頁」翻頁；點頁碼可以直接輸入頁數</li>
         <li>雙指捏合或點兩下：放大（放大後單指拖曳移動）；電腦：Ctrl＋滾輪縮放、方向鍵翻頁</li>
         <li>「整頁／適合寬度」切換顯示方式；「縮圖」打開頁面縮圖列</li>
+        <li class="touch-only">點一下畫面：收起／顯示上方列和工具（全螢幕看圖）</li>
+        <li>版面：<span id="ui-mode"></span> <button class="btn" id="ui-toggle"></button></li>
       </ul>
       <ul class="small" id="info-3d-help">
         <li>單指拖曳：旋轉　雙指捏合：縮放　雙指拖曳：平移</li>

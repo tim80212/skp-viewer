@@ -232,3 +232,45 @@ dd { margin: 0; word-break: break-all; }
 .mkind.pdf { background: #c24e2a; }
 /* v0.8.0 圖磚：一張跟畫面一樣大的畫布 */
 #pdf-view canvas.pdf-tiles { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+
+/* ---------- v0.10.2：PDF 版面不用 3D 的格線（以前橫向寬度 ≥ 600 時套到 3D 的「左邊場景欄、右邊工具欄」，工具列跑出畫面） ---------- */
+#app.pdf { grid-template-columns: 1fr !important; grid-template-rows: calc(var(--bar-h) + var(--safe-t)) 1fr calc(var(--tools-h) + var(--safe-b)) !important;
+  grid-template-areas: "bar" "stage" "tools" !important; }
+#app.pdf #pdf-tools { flex-direction: row; border-left: 0; }
+#app.pdf #pdf-tools .tool { flex: 1 1 0; max-width: 120px; flex-direction: row; font-size: 14px; }
+/* 縮圖列：蓋在圖上（不佔版面，按「縮圖」才出來） */
+#app.pdf #pdf-thumbs:not([hidden]) { position: absolute; left: 0; right: 0; bottom: calc(var(--tools-h) + var(--safe-b)); z-index: 3;
+  height: 112px; box-shadow: 0 -2px 10px rgba(0,0,0,.18); }
+.touch-only { display: none; }
+.touch-ui .touch-only { display: list-item; }
+/* 翻頁時中間上方的頁碼 */
+#pdf-badge { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 2; padding: 4px 14px; border-radius: 14px;
+  background: rgba(31,41,51,.78); color: #fff; font-size: 15px; pointer-events: none; transition: opacity .3s; }
+#pdf-badge.fade { opacity: 0; }
+
+/* 觸控看圖模式（手機、平板）：點一下收起上方列和工具＝全螢幕看圖 */
+.touch-ui #app.pdf.chrome-off { grid-template-rows: 0 1fr 0 !important; }
+.touch-ui #app.pdf.chrome-off #bar, .touch-ui #app.pdf.chrome-off #pdf-tools, .touch-ui #app.pdf.chrome-off #pdf-thumbs { display: none !important; }
+
+/* 觸控、橫向：上方列變細，圖用滿整個畫面，工具改成右邊直立的浮動按鈕，縮圖從左邊滑出 */
+@media (orientation: landscape) {
+  .touch-ui #app.pdf { grid-template-rows: calc(var(--bar-h) + var(--safe-t)) 1fr !important; grid-template-areas: "bar" "stage" !important; }
+  .touch-ui #app.pdf #pdf-tools { position: absolute; right: calc(8px + var(--safe-r)); top: calc(var(--bar-h) + var(--safe-t)); bottom: 0; margin: auto 0;
+    height: max-content; max-height: calc(100% - var(--bar-h) - var(--safe-t) - 16px); width: 60px; padding: 6px 0; z-index: 4;
+    flex-direction: column; justify-content: flex-start; align-items: center; gap: 2px;
+    background: rgba(255,255,255,.93); border: 0; border-radius: 30px; box-shadow: 0 2px 12px rgba(0,0,0,.3); }
+  .touch-ui #app.pdf #pdf-tools .tool { flex: 0 0 auto; width: 56px; max-width: none; min-height: 44px; padding: 0; font-size: 13px; flex-direction: column; justify-content: center; }
+  .touch-ui #app.pdf #pdf-tools .tool span:not(.ic) { display: none; }
+  .touch-ui #app.pdf #pdf-tools #pdf-prev .ic, .touch-ui #app.pdf #pdf-tools #pdf-next .ic { transform: rotate(90deg); display: inline-block; }
+  .touch-ui #app.pdf #pdf-tools .pdf-pageno { flex-direction: column; gap: 0; font-size: 12px; min-height: 44px; justify-content: center; }
+  .touch-ui #app.pdf #pdf-tools #pdf-num { width: 48px; height: 30px; }
+  .touch-ui #app.pdf #pdf-thumbs:not([hidden]) { top: calc(var(--bar-h) + var(--safe-t)); bottom: 0; left: 0; right: auto; height: auto;
+    width: calc(92px + var(--safe-l)); flex-direction: column; align-items: center; overflow-x: hidden; overflow-y: auto;
+    padding: 6px 6px calc(6px + var(--safe-b)) calc(6px + var(--safe-l)); border-top: 0; border-right: 1px solid var(--line); box-shadow: 2px 0 10px rgba(0,0,0,.18); }
+  .touch-ui #app.pdf #pdf-badge { top: 8px; }
+}
+.autodev { display: flex; gap: 8px; align-items: flex-start; margin: 2px 0 10px; padding: 8px 10px; background: #f1f6ff; border-radius: 8px; }
+.touch-ui #app.pdf { --tools-h: 48px; } /* v0.10.2：觸控模式的按鈕至少 44 px 高 */
+.touch-ui #app.pdf #pdf-num { height: 44px !important; font-size: 16px; } /* 頁碼欄也要好點（iPhone 字小於 16px 會自動放大畫面） */
+.pthumb canvas { max-width: 56px; max-height: 76px; display: block; } /* v0.10.2：縮圖整頁縮小（以前沒設大小，只看得到中間一塊，常常是白的） */
+@media (orientation: landscape) { .touch-ui #app.pdf .pdf-net { right: calc(80px + var(--safe-r)); } } /* 不要蓋到右邊的按鈕 */
