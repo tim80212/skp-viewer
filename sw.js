@@ -3,7 +3,7 @@
 //   每一版改 CACHE 名稱：瀏覽器發現 sw.js 變了就裝新版，安裝時把 FILES 整組重新下載（cache:'reload'，不用 HTTP 快取裡的舊檔），
 //   裝好就換新版、刪掉舊的快取，所以不會新舊檔混在一起。下次打開網頁就是新版。
 //   沒帶 ?mode=cache（本機測試）＝「網路優先」：改了程式馬上看得到，沒網路才用快取。
-const CACHE = 'skpv-0.10.2';
+const CACHE = 'skpv-0.10.3';
 const CACHE_FIRST = new URL(self.location.href).searchParams.get('mode') === 'cache';
 const FILES = [
   './', './index.html', './app.css', './app.js', './model3d.js', './cloud.js', './share.js', './notice.js', './pdfview.js', './pdfdata.js', './offline.js',

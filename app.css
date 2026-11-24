@@ -274,3 +274,4 @@ dd { margin: 0; word-break: break-all; }
 .touch-ui #app.pdf #pdf-num { height: 44px !important; font-size: 16px; } /* 頁碼欄也要好點（iPhone 字小於 16px 會自動放大畫面） */
 .pthumb canvas { max-width: 56px; max-height: 76px; display: block; } /* v0.10.2：縮圖整頁縮小（以前沒設大小，只看得到中間一塊，常常是白的） */
 @media (orientation: landscape) { .touch-ui #app.pdf .pdf-net { right: calc(80px + var(--safe-r)); } } /* 不要蓋到右邊的按鈕 */
+@media (orientation: landscape) and (max-height: 500px) { .touch-ui #app.pdf { --bar-h: 36px; } .touch-ui #app.pdf #bar .btn { height: 30px; } } /* v0.10.3：手機橫向上方列再壓扁 */

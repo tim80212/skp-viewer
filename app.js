@@ -6,7 +6,7 @@ import * as mem from './device.js';
 import * as share from './share.js';
 import * as pdfv from './pdfview.js';
 
-const APP_VERSION = '0.10.2';
+const APP_VERSION = '0.10.3';
 window.__skpvVersion = APP_VERSION; // 測試用（Service Worker 換版）
 const $ = (s) => document.querySelector(s);
 const app = $('#app');

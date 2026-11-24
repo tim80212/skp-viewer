@@ -195,7 +195,7 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   netUi();
   S.cur = 1;
   S.fit = TOUCH_UI && innerWidth > innerHeight ? 'page' : 'width'; // v0.10.2：觸控、橫向一開始整頁
-  $('#pdf-fit').textContent = S.fit === 'width' ? '整頁' : '適合寬度';
+  fitUi();
   S.zoom = 1;
   $('#pdf-count').textContent = S.n;
   buildThumbs();
@@ -206,6 +206,14 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.timing.firstPageNav = Math.round(performance.now()); // 從打開網頁算起
   step('pdf first page');
   window.__skpvPdfTiming = S.timing;
+  if (TOUCH_UI && DEVICE === 'phone' && innerWidth > innerHeight && new URLSearchParams(location.search).get('autohide') !== '0') {
+    const tk = S.token;
+    setTimeout(() => { // v0.10.3：手機橫向一開檔就收起（看圖面積最大），點一下才出現
+      if (tk !== S.token || $('#app').classList.contains('chrome-off')) return;
+      toggleChrome(true);
+      if (!S.hintShown && ui && ui.toast) { S.hintShown = true; ui.toast('點一下畫面：顯示工具', 2500); }
+    }, 1200);
+  }
   if (S.keep) keepWhenDone(token);
   return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl, images: !!(S.tl && S.tl.images), full: source.state };
 }
@@ -415,7 +423,14 @@ function fitScale(sz) {
 }
 function fitScaleWH(sz, W, H) {
   const m = 8;
+  W -= insetR(W, H);
   return S.fit === 'width' ? (W - m * 2) / sz.w : Math.min((W - m * 2) / sz.w, (H - m * 2) / sz.h);
+}
+// v0.10.3：觸控、橫向、工具顯示時，右邊直立的工具佔掉的寬度（整頁、置中都扣掉它，圖的右緣不會被蓋住）
+function insetR(W, H) {
+  if (!TOUCH_UI || W <= H || $('#app').classList.contains('chrome-off')) return 0;
+  const t = $('#pdf-tools');
+  return t ? Math.round(t.getBoundingClientRect().width) + 12 : 0;
 }
 function maxZoom(sz) { return Math.min(40, Math.max(3, 4 / fitScale(sz))); }
 
@@ -485,6 +500,8 @@ export async function go(n, first = false) {
       if (k >= 1 && k <= S.n && !S.bases.has(k)) {
         await pageSize(k);
         await showBase(k);
+        // v0.10.3：畫的時候已經跳到很遠的頁（例如輸入頁碼）：這張不要了（以前會留著，記憶體多一張）
+        if (S.cur !== n && Math.abs(k - S.cur) > 1 && S.bases.has(k)) { freeCanvas(S.bases.get(k).canvas); S.bases.delete(k); releasePage(k); return; }
         if (S.bases.get(k) && !S.bases.get(k).preview && S.cur !== k) releasePage(k);
       }
     }
@@ -682,6 +699,12 @@ export function setZoom(z, cx, cy) {
   layout();
   if (!S.gesture) scheduleDetail();
 }
+function fitUi() {
+  const b = $('#pdf-fit');
+  b.textContent = '整頁';
+  b.classList.toggle('on', S.fit === 'page');
+  b.title = S.fit === 'page' ? '目前：整頁（再按一次：適合寬度）' : '目前：適合寬度（按一下：整頁）';
+}
 function setFit(f) {
   S.fit = f;
   S.zoom = 1;
@@ -689,7 +712,7 @@ function setFit(f) {
   dropDetail();
   for (const b of S.bases.values()) freeCanvas(b.canvas);
   S.bases.clear(); // 底圖的大小跟「適合寬度／整頁」有關，重畫
-  $('#pdf-fit').textContent = f === 'width' ? '整頁' : '適合寬度';
+  fitUi();
   go(S.cur, true);
 }
 
@@ -754,7 +777,10 @@ function setupGestures() {
     // v0.10.2 觸控模式：單擊（沒移動、很快放開）＝收起／顯示工具（等 0.3 秒確定不是點兩下）
     if (TOUCH_UI && swipe && !S.gesture && Math.abs(e.clientX - swipe.x) + Math.abs(e.clientY - swipe.y) < 10 && performance.now() - swipe.t < 300) {
       clearTimeout(tapT);
-      tapT = setTimeout(() => { if (performance.now() - lastTap >= 290) toggleChrome(); }, 310);
+      tapT = setTimeout(() => {
+        if (performance.now() - lastTap < 290) return;
+        if (!$('#pdf-thumbs').hidden) closeThumbs(); else toggleChrome(); // v0.10.3：縮圖開著先收縮圖
+      }, 310);
     }
     // 沒放大、左右滑超過 60 px：翻頁
     if (swipe && S.zoom <= 1.02) {
@@ -986,7 +1012,8 @@ function clampPan(sz) {
   const { W, H } = viewRect();
   const sc = fitScale(sz) * S.zoom;
   const pw = sz.w * sc, ph = sz.h * sc;
-  S.panX = pw <= W ? (W - pw) / 2 : Math.min(0, Math.max(W - pw, S.panX));
+  const ir = insetR(W, H);
+  S.panX = pw <= W - ir ? (W - ir - pw) / 2 : pw <= W ? Math.min(0, Math.max(W - pw, S.panX)) : Math.min(0, Math.max(W - ir - pw, S.panX));
   S.panY = ph <= H ? (H - ph) / 2 : Math.min(0, Math.max(H - ph, S.panY));
 }
 function requestDraw() {
@@ -1293,6 +1320,10 @@ function badge(n) {
   clearTimeout(S.badgeT);
   S.badgeT = setTimeout(() => { b.classList.add('fade'); S.badgeT = setTimeout(() => { b.hidden = true; }, 350); }, 1100);
 }
+function closeThumbs() {
+  $('#pdf-thumbs').hidden = true;
+  $('#pdf-thumb-btn').classList.remove('on');
+}
 // v0.10.2：點一下畫面收起／顯示上方列和工具（觸控模式）
 export function toggleChrome(force) {
   const app = $('#app');
@@ -1348,11 +1379,14 @@ export function init(hooks) {
   });
   let showThumbs = DEVICE !== 'phone';
   try { const v = localStorage.getItem('skpv-pdf-thumbs'); if (v != null) showThumbs = v === '1'; } catch (e) { /* 略過 */ }
+  if (TOUCH_UI) showThumbs = false; // v0.10.3：觸控模式一律收起（按「縮圖」才滑出來，蓋在圖上）
   $('#pdf-thumbs').hidden = !showThumbs;
   $('#pdf-thumb-btn').classList.toggle('on', showThumbs);
   $('#pdf-thumbs').addEventListener('click', (e) => {
     const b = e.target.closest('.pthumb');
-    if (b) go(Number(b.dataset.n));
+    if (!b) return;
+    go(Number(b.dataset.n));
+    if (TOUCH_UI) closeThumbs(); // v0.10.3：觸控模式點了某一頁就收起（縮圖蓋在圖上）
   });
   // v0.9.0：離線準備、速度紀錄
   $('#pdf-net').addEventListener('click', () => { $('#pdf-dl').hidden = false; dlPanel(); });
@@ -1391,6 +1425,7 @@ export function init(hooks) {
   window.skpvPdf = {
     go, setZoom, info, speedLog: () => JSON.parse(speedLog()), net: () => (S.src ? S.src.stats() : null),
     // 測試用：放大到「每 pt 幾個 CSS 像素」（2.5 ≈ 7 pt 的字 17 px 高，看得清楚）
+    pageRect() { const sz = S.sizes.get(S.cur); const c = sz ? fitScale(sz) * S.zoom : 0; return sz ? { x: S.panX, y: S.panY, w: sz.w * c, h: sz.h * c } : null; }, // 測試用（v0.10.3）
     cssPerPt() { const sz = S.sizes.get(S.cur); return sz ? fitScale(sz) * S.zoom : 0; }, // 測試用（v0.10.2）
     zoomToCss(cssPerPt, cx, cy) { const sz = S.sizes.get(S.cur); setZoom(cssPerPt / fitScale(sz), cx, cy); }, get state() { return { cur: S.cur, n: S.n, zoom: +S.zoom.toFixed(3), fit: S.fit, panX: Math.round(S.panX), panY: Math.round(S.panY),
       bases: [...S.bases.keys()], detail: S.detail ? [S.detail.canvas.width, S.detail.canvas.height] : null, wm: S.wm, rendering: S.rendering }; },
