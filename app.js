@@ -9,7 +9,7 @@ import * as mem from './memory.js';
 import * as share from './share.js';
 import * as pdfv from './pdfview.js';
 
-const APP_VERSION = '0.8.1';
+const APP_VERSION = '0.9.0';
 const FORMAT_VERSION = 1;
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -295,7 +295,7 @@ async function openPdf(src, name, t0 = performance.now(), opts = {}) {
   app.classList.remove('empty');
   let r;
   try {
-    r = await pdfv.openPdf(src, { name, share: opts.share, t0, hooks: { toast } });
+    r = await pdfv.openPdf(src, { name, share: opts.share, keep: opts.keep || null, t0, hooks: { toast } });
   } catch (err) {
     if (!wasPdf) app.classList.remove('pdf');
     if (wasEmpty) app.classList.add('empty');
@@ -312,7 +312,6 @@ async function openPdf(src, name, t0 = performance.now(), opts = {}) {
   loadingModel = false;
   updateMeta();
   document.title = `${r.share ? '#' + r.share.code : name.replace(/\.pdf$/i, '')} — SKP 瀏覽器`;
-  if (r.mode === 'range') toast(`分段讀取：只下載看到的頁（全檔 ${mb(r.bytes)}）`, 2500);
   return r;
 }
 

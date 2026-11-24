@@ -160,18 +160,25 @@ export async function openShare(ui) {
   const name = `#${o.code}`;
   ui.loadBegin({ name, size: 0 });
   const media = `${base}/drive/v3/files/${encodeURIComponent(o.file)}?alt=media&key=${encodeURIComponent(apiKey)}`;
-  // v0.7.0：PDF 分段讀取（不先下載整個檔案）；cache:'no-store'、不帶 cookie，不留在對方手機
+  // v0.7.0：PDF 分段讀取；v0.9.0：背景整份下載到這一頁的記憶體（cache:'no-store'、不帶 cookie，不進 IndexedDB／Cache Storage，關掉就沒了）
   let meta = null;
+  // v0.9.0：讀檔案資料的同時就先發 bytes=0- 的下載請求（Drive 每個下載請求都要先等好幾秒）；不是 PDF 就取消
+  const preCtrl = new AbortController();
+  const pre = { t0: performance.now(), abort: () => preCtrl.abort(),
+    res: fetch(media, { headers: { Range: 'bytes=0-' }, cache: 'no-store', credentials: 'omit', signal: preCtrl.signal }) };
+  pre.res.catch(() => {});
   try {
     meta = await getJson(`${base}/drive/v3/files/${encodeURIComponent(o.file)}?fields=size,mimeType&key=${encodeURIComponent(apiKey)}`);
   } catch (e) {
+    pre.abort();
     if (e.status === 404 || e.status === 403) return problem(ui, 'revoked');
     return problem(ui, 'offline');
   }
   if (meta.mimeType === 'application/pdf') {
     document.body.classList.add('shared');
     try {
-      await ui.openPdf({ size: Number(meta.size || 0), fetchRange: rangeFetcher(media) }, name, t0, { share: { code: o.code, expires: o.expires } });
+      const rf = rangeFetcher(media); // v0.9.0：背景整份下載到記憶體（不存在裝置上：沒有 keep）
+      await ui.openPdf({ size: Number(meta.size || 0), fetchRange: rf, open: rf.open, pre }, name, t0, { share: { code: o.code, expires: o.expires } });
     } catch (e) {
       if (e.status === 404 || e.status === 403) return problem(ui, 'revoked');
       if (e.status || /fetch|network/i.test(String(e.message))) return problem(ui, 'offline');
@@ -180,6 +187,7 @@ export async function openShare(ui) {
     document.body.dataset.share = 'open';
     return true;
   }
+  pre.abort();
   ui.showLoading('下載模型…');
   let buf;
   try {

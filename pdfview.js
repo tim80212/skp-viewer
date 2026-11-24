@@ -11,6 +11,8 @@
 //   有預覽：先秀預覽（瀏覽器原生解圖、在背景執行緒，很快），pdf.js 同時在背景開檔；預覽夠清楚就不用 pdf.js 畫，
 //   不夠清楚（電腦高解析度螢幕）才在背景畫清晰版換上去；放大時照舊只補畫看得到的區域。縮圖列直接用縮圖，不用 pdf.js。
 import { DEVICE } from './memory.js';
+import { Source } from './pdfdata.js';
+import * as offline from './offline.js';
 
 const $ = (s) => document.querySelector(s);
 const CAPS = {
@@ -19,7 +21,7 @@ const CAPS = {
   desktop: { base: 12e6, detail: 10e6, maxImage: -1, thumbs: 2 },
 }[DEVICE] || { base: 6e6, detail: 6e6, maxImage: -1, thumbs: 1 };
 const RANGE_CHUNK = 256 * 1024;
-const FIRST_CHUNK = 512 * 1024;
+const FIRST_CHUNK = 64 * 1024; // v0.9.0：開檔先讀 64 KB（檔頭、索引的位置；其他的跟著背景下載進來）
 
 let pdfjs = null;
 let ui = null;
@@ -34,7 +36,7 @@ const S = {
 const PV_TAG = '%SKPV-PREVIEW ';
 const NO_VECTOR = new URLSearchParams(location.search).get('vector') === '0';
 // v0.8.0 圖磚：一次最多幾個請求、相鄰多近就合併成一個請求、快取多少像素
-const TL = { conc: 4, gap: 24 * 1024, maxReq: 3 * 1048576, cachePx: DEVICE === 'phone' ? 48e6 : DEVICE === 'tablet' ? 80e6 : 160e6 };
+const TL = { conc: 4, gap: 24 * 1024, maxReq: 3 * 1048576, blockMax: 8 * 1048576, cachePx: DEVICE === 'phone' ? 48e6 : DEVICE === 'tablet' ? 80e6 : 160e6 };
 
 async function lib() {
   if (!pdfjs) {
@@ -51,8 +53,9 @@ export function isPdf(buf) {
 }
 
 // ---------------------------------------------------------------- 開啟
-// src：{ data: ArrayBuffer } 或 { size, fetchRange(begin, end) → Promise<ArrayBuffer|{full:ArrayBuffer}> }
-export async function openPdf(src, { name = '', share = null, t0 = performance.now(), hooks } = {}) {
+// src：{ data: ArrayBuffer, cached? } 或 { size, open(begin, end, signal) → Promise<Response> }（Range 請求）或 Source
+// keep：擁有者（自己登入、自己的檔案）{ id, name, modifiedTime, md5, cached? } → 下載完存在這台裝置（offline.js）。分享連結一律 null
+export async function openPdf(src, { name = '', share = null, t0 = performance.now(), hooks, keep = null } = {}) {
   ui = hooks || ui;
   const lib0 = performance.now();
   // pdf.js（約 1.8 MB）：有圖磚（v0.8.0）的檔案完全不載入；有預覽（v0.7.1）的跟第一段資料同時下載
@@ -72,7 +75,8 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.pv = null;
   S.pvFail = false;
   S.head = null;
-  S.timing = {};
+  S.timing = { startNav: Math.round(t0), openPdfNav: Math.round(performance.now()) }; // 從打開網頁算起的時間點（速度紀錄）
+  S.t0 = t0;
   S.stats = { previews: 0, sharp: 0, detail: 0 };
   S.docReady = null;
   S.tl = null;
@@ -83,50 +87,33 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     isEvalSupported: false, enableXfa: false, maxImageSize: CAPS.maxImage, disableFontFace: false,
     useSystemFonts: true, stopAtErrors: false,
   };
-  let makeParams;
-  if (src.data) {
-    S.mode = 'data';
-    S.bytes = src.data.byteLength;
-    S.fetched = S.bytes;
-    S.get = (off, len) => Promise.resolve(src.data.slice(off, off + len));
-    makeParams = () => ({ ...common, data: new Uint8Array(src.data.slice(0)) });
-  } else {
-    S.bytes = src.size;
-    const first = await src.fetchRange(0, Math.min(src.size, FIRST_CHUNK));
-    if (token !== S.token) return null;
-    if (first.full) { // 伺服器不支援 Range：整個檔案已經下載了
-      S.mode = 'full';
-      S.fetched = first.full.byteLength;
-      S.head = first.full;
-      S.get = (off, len) => Promise.resolve(first.full.slice(off, off + len));
-      makeParams = () => ({ ...common, data: new Uint8Array(first.full.slice(0)) });
-    } else {
-      S.mode = 'range';
-      S.fetched = first.byteLength;
-      S.requests = 1;
-      if (!isPdf(first)) throw new Error('這不是 PDF 檔。');
-      S.head = first;
-      S.get = async (off, len) => { // 預覽、縮圖：第一段裡有的直接拿，沒有的自己抓（不經過 pdf.js）
-        if (off + len <= first.byteLength) return first.slice(off, off + len);
-        S.requests++;
-        const b = await src.fetchRange(off, off + len);
-        S.fetched += b.byteLength;
-        return b;
-      };
-      makeParams = (P) => {
-        const tr = new P.PDFDataRangeTransport(src.size, new Uint8Array(first.slice(0)));
-        tr.requestDataRange = (begin, end) => {
-          S.requests++;
-          src.fetchRange(begin, end).then((buf) => {
-            S.fetched += buf.byteLength;
-            tr.onDataRange(begin, new Uint8Array(buf));
-            progress();
-          }).catch((e) => { S.rangeError = e; ui && ui.toast && ui.toast('下載 PDF 時網路中斷，請重新整理再試一次', 5000); });
-        };
-        return { ...common, range: tr, length: src.size, rangeChunkSize: RANGE_CHUNK, disableAutoFetch: true, disableStream: true };
-      };
-    }
-  }
+  // v0.9.0：資料一律經過 Source（pdfdata.js）：開檔就在背景把整個檔案分 4 段下載到記憶體，讀的時候有就直接拿
+  if (S.src) { S.src.close(); S.src = null; }
+  const source = src instanceof Source ? src : new Source(src.data ? { data: src.data, cached: !!src.cached } : { size: src.size, open: src.open, pre: src.pre || null });
+  S.src = source;
+  S.keep = keep || null;
+  S.bytes = source.size;
+  source.on(() => netUi());
+  source.startFull();
+  netUi();
+  const first = await source.read(0, Math.min(source.size, FIRST_CHUNK));
+  if (token !== S.token) return null;
+  if (!isPdf(first)) throw new Error('這不是 PDF 檔。');
+  S.timing.headNav = Math.round(performance.now());
+  S.mode = source.state === 'done' ? 'data' : 'range';
+  S.head = first;
+  S.get = (off, len) => source.read(off, len);
+  const makeParams = (P) => {
+    const tr = new P.PDFDataRangeTransport(source.size, new Uint8Array(first.slice(0)));
+    tr.requestDataRange = (begin, end) => {
+      S.requests++;
+      source.read(begin, end - begin).then((buf) => {
+        tr.onDataRange(begin, new Uint8Array(buf));
+        progress();
+      }).catch((e) => { S.rangeError = e; ui && ui.toast && ui.toast('下載 PDF 時網路中斷，請重新整理再試一次', 5000); });
+    };
+    return { ...common, range: tr, length: source.size, rangeChunkSize: RANGE_CHUNK, disableAutoFetch: true, disableStream: true };
+  };
   const startDoc = async () => {
     const P = await getLib();
     if (token !== S.token) throw new Error('canceled');
@@ -134,11 +121,12 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     return S.task.promise;
   };
   // v0.7.1：先看檔案裡有沒有預覽（有的話不用等 pdf.js 開檔就能先顯示）
-  const firstBuf = src.data || S.head;
+  const firstBuf = S.head;
   try { S.pv = await readIndex(firstBuf); } catch (e) { S.pv = null; }
+  S.timing.indexNav = Math.round(performance.now());
   if (token !== S.token) return null;
   let shareInfo = null;
-  if (S.pv && S.pv.v === 2) { // v0.8.0：圖磚，不用 pdf.js
+  if (S.pv && S.pv.v >= 2) { // v0.8.0：圖磚，不用 pdf.js（v0.9.0：v3＝第 1 頁和縮圖放前面）
     S.tl = tilesFrom(S.pv);
     S.pv = null;
     shareInfo = S.tl.share || null;
@@ -180,6 +168,7 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.wm = shareInfo ? `#${shareInfo.code}・僅供檢視・${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : '';
   S.share = shareInfo;
   S.open = true;
+  netUi();
   S.cur = 1;
   S.fit = 'width';
   S.zoom = 1;
@@ -188,9 +177,11 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.timing = { ...S.timing, open: +(performance.now() - t0).toFixed(0), preview: !!S.pv };
   await go(1, true);
   S.timing.firstPage = +(performance.now() - t0).toFixed(0);
-  S.timing.bytesAtFirstPage = S.fetched;
+  S.timing.bytesAtFirstPage = source.received;
+  S.timing.firstPageNav = Math.round(performance.now()); // 從打開網頁算起
   window.__skpvPdfTiming = S.timing;
-  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl };
+  if (S.keep) keepWhenDone(token);
+  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl, full: source.state };
 }
 
 // 分享副本（第 2 層）：檔案裡寫著代號和到期時間，過期就不顯示（存了檔、換個方式打開也一樣）
@@ -219,7 +210,7 @@ async function readIndex(buf) {
   const m = /^%SKPV-PREVIEW (\d{12}) (\d{12})/.exec(head.slice(i));
   if (!m) return null;
   const js = JSON.parse(new TextDecoder().decode(await S.get(Number(m[1]), Number(m[2]))));
-  if (!js || (js.v !== 1 && js.v !== 2) || !Array.isArray(js.pages) || !js.pages.length) return null;
+  if (!js || ![1, 2, 3].includes(js.v) || !Array.isArray(js.pages) || !js.pages.length) return null;
   return js;
 }
 function previewBitmap(n) {
@@ -249,6 +240,13 @@ async function previewCanvas(n) {
 export function close() {
   S.token++;
   S.open = false;
+  if (S.src) { S.src.close(); S.src = null; }
+  S.keep = null;
+  S.keepSaved = false;
+  S.keepTried = false;
+  if ($('#pdf-net')) $('#pdf-net').hidden = true;
+  if ($('#pdf-dl')) $('#pdf-dl').hidden = true;
+  if ($('#pdf-debug')) $('#pdf-debug').hidden = true;
   for (const b of S.bases.values()) freeCanvas(b.canvas);
   S.bases.clear();
   S.sizes.clear();
@@ -275,17 +273,96 @@ export function close() {
 }
 
 export function info() {
-  return { name: S.name, pages: S.n, bytes: S.bytes, mode: S.mode, fetched: S.fetched, requests: S.requests, share: S.share, timing: S.timing,
-    preview: !!S.pv && !S.pvFail, stats: { ...S.stats }, docReady: !!S.doc, tiles: !!S.tl, tileStats: { ...S.tstat, cached: S.tcache.size },
-    pdfjsLoaded: !!pdfjs };
+  const net = S.src ? S.src.stats() : null;
+  return { name: S.name, pages: S.n, bytes: S.bytes, mode: S.mode, fetched: net ? net.received : S.fetched, requests: net ? net.requests : S.requests,
+    share: S.share, timing: S.timing, preview: !!S.pv && !S.pvFail, stats: { ...S.stats }, docReady: !!S.doc, tiles: !!S.tl,
+    tileStats: { ...S.tstat, cached: S.tcache.size, net }, pdfjsLoaded: !!pdfjs, keep: S.keep ? { saved: !!S.keepSaved, cached: !!S.keep.cached } : null };
 }
 
 function freeCanvas(c) { if (c) { c.width = 0; c.height = 0; c.remove(); } }
 
-function progress() {
-  if (S.mode !== 'range') return;
+function progress() { netUi(); }
+
+// ---------------------------------------------------------------- 離線準備（v0.9.0）
+// 右上角的小標籤：背景下載的進度 → 下載完（翻頁、放大都不用再上網）；擁有者的檔案存在這台裝置上（下次秒開、沒網路也能開）
+const mbText = (b) => `${(b / 1048576).toFixed(b < 10 * 1048576 ? 1 : 0)} MB`;
+function netState() {
+  const src = S.src;
+  if (!src) return { text: '', cls: '' };
+  if (S.keep && S.keep.cached) return { text: '✓ 這台裝置上的版本', cls: 'ok', long: `這份文件存在這台裝置上（${mbText(src.size)}），沒有網路也能開。` };
+  if (src.state === 'loading') {
+    const p = Math.floor(src.progress * 100);
+    return { text: `離線準備 ${p}%`, cls: 'busy', long: `正在背景下載整份文件（${mbText(src.received)} / ${mbText(src.size)}）。下載完以後翻頁、放大都不用再上網。` };
+  }
+  if (src.state === 'done') {
+    if (S.keep && S.keepSaved) return { text: '✓ 已存在這台裝置', cls: 'ok', long: `這份文件已經存在這台裝置上（${mbText(src.size)}），下次打開不用下載，現場沒有網路也能開。` };
+    if (S.keep) return { text: '✓ 已下載', cls: 'ok', long: `整份文件已經下載到記憶體（${mbText(src.size)}），翻頁、放大都不用再上網。` };
+    return { text: '✓ 已下載', cls: 'ok', long: `整份文件已經下載到這一頁的記憶體（${mbText(src.size)}），翻頁、放大都不用再上網。${S.share ? '關掉網頁就清掉，不會存在這台裝置上。' : ''}` };
+  }
+  if (src.state === 'off') return { text: '只下載看到的頁', cls: '', long: `這份文件很大（${mbText(src.size)}），只下載看到的頁（每頁要等網路）。` };
+  if (src.state === 'failed') return { text: '下載中斷', cls: 'warn', long: '背景下載中斷了：之後看到的頁會一頁一頁從網路抓（比較慢）。' };
+  return { text: '', cls: '', long: '' };
+}
+function netUi() {
   const el = $('#pdf-net');
-  if (el) el.textContent = `已下載 ${(S.fetched / 1048576).toFixed(1)} / ${(S.bytes / 1048576).toFixed(1)} MB`;
+  if (!el) return;
+  const st = netState();
+  el.hidden = !S.open || !st.text;
+  el.textContent = st.text;
+  el.className = 'pdf-net ' + st.cls;
+  if (!$('#pdf-dl').hidden) dlPanel();
+  if (S.debug) debugUi();
+}
+function dlPanel() {
+  const st = netState();
+  $('#pdf-dl-text').textContent = st.long || '';
+  const owner = !!S.keep;
+  $('#pdf-dl-save').hidden = !owner || S.keep.cached || S.keepSaved;
+  $('#pdf-dl-save').disabled = !(S.src && S.src.state === 'done');
+  $('#pdf-dl-save').textContent = S.src && S.src.state === 'done' ? '下載到這台裝置（現場離線用）' : '下載到這台裝置（下載完才能存）';
+  $('#pdf-dl-clear').hidden = !owner || !(S.keep.cached || S.keepSaved);
+  $('#pdf-dl-note').hidden = owner;
+}
+async function saveKeep() {
+  const src = S.src, k = S.keep;
+  if (!src || !k || k.cached || src.state !== 'done') return false;
+  const blob = src.blob();
+  if (!blob) return false;
+  try {
+    await offline.put({ id: k.id, name: k.name, size: src.size, modifiedTime: k.modifiedTime || '', md5: k.md5 || '', blob });
+    if (S.keep === k) { S.keepSaved = true; netUi(); }
+    return true;
+  } catch (e) {
+    if (ui && ui.toast) ui.toast('這台裝置的儲存空間不夠，沒辦法存下來（照樣可以看）', 4000);
+    return false;
+  }
+}
+// 擁有者：背景下載完就自動存在這台裝置上（下次秒開、沒網路也能開）
+function keepWhenDone(token) {
+  if (!S.keep || S.keep.cached) return;
+  const check = () => {
+    if (token !== S.token || !S.src) return true;
+    if (S.src.state === 'done') { if (!S.keepSaved && !S.keepTried) { S.keepTried = true; saveKeep(); } return true; }
+    return S.src.state === 'off' || S.src.state === 'failed';
+  };
+  if (check()) return;
+  const off = S.src.on(() => { if (check()) off(); });
+}
+function debugUi() {
+  const el = $('#pdf-debug');
+  el.hidden = !S.debug || !S.open;
+  if (el.hidden || !S.src) return;
+  const n = S.src.stats();
+  const t = S.timing || {};
+  el.textContent = [
+    `檔案 ${mbText(n.size)}・${n.state}${n.cached ? '（裝置）' : ''}・已下載 ${Math.round(100 * n.received / (n.size || 1))}%`,
+    `請求 ${n.requests} 個（自己抓 ${n.ownRequests}）・等待 中位 ${n.waitMedianMs ?? '-'} / 最久 ${n.waitMaxMs ?? '-'} ms・${n.MBps ?? '-'} MB/s`,
+    `第一頁 ${t.firstPage ?? '-'} ms・清楚 ${t.firstSharp ?? '-'} ms・整份 ${n.fullMs ?? '-'} ms・翻頁 ${t.lastFlip ?? '-'} ms・清楚 ${t.lastSharp ?? '-'} ms`,
+  ].join(String.fromCharCode(10));
+}
+function speedLog() {
+  return JSON.stringify({ app: 'skpv-pdf', at: new Date().toISOString(), device: DEVICE, ua: navigator.userAgent, name: S.share ? `#${S.share.code}` : S.name,
+    pages: S.n, timing: S.timing, net: S.src ? S.src.stats() : null, tiles: { ...S.tstat } });
 }
 
 // ---------------------------------------------------------------- 尺寸、版面
@@ -798,8 +875,11 @@ async function pumpPvThumbs() {
 // ---------------------------------------------------------------- 圖磚（v0.8.0）
 // 桌面程式用 PDFium 把每頁畫成多層圖磚（最清楚一層 300 dpi），網頁只抓畫面上看得到的那幾塊貼上去：
 // 縮放、平移、翻頁都不用 pdf.js 畫向量。先畫粗的層（已經有的放大），清楚的層到了再蓋上去，所以不會空白。
+// v0.9.0（索引 v3）：每頁分成「小的」（最小 sl 層，縮圖）和「大的」兩段，s／o 是兩段的位置。v2：一頁一段（o）。
+// blocks＝這頁的段 [起, 迄)：網頁一次抓一整段（Google Drive 每個請求都要等好幾秒，一頁只發一個請求）
 function tilesFrom(js) {
   const T = js.tile || 512;
+  const sl = js.v >= 3 ? (js.sl || 2) : 0;
   const pages = js.pages.map((p) => {
     const raw = Uint8Array.from(atob(p.t), (c) => c.charCodeAt(0));
     const u = new Uint32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
@@ -811,8 +891,11 @@ function tilesFrom(js) {
     // 每塊：全白（不存）、跟同一層前面某塊一樣（canon 指到那塊）、一般（位置、長度）
     const lens = new Uint32Array(u.length), webp = new Uint8Array(u.length), offs = new Float64Array(u.length);
     const blank = new Uint8Array(u.length), canon = new Uint32Array(u.length);
-    let o = p.o;
+    const small = sl > 0 && p.s != null;
+    let o = small ? p.s : p.o;
+    const blocks = [[o, o]];
     for (let k = L - 1; k >= 0; k--) {
+      if (small && k === L - 1 - sl) { o = p.o; blocks.push([o, o]); } // 大的那段
       for (let j = 0, n = grid[k].cols * grid[k].rows; j < n; j++) {
         const i = start[k] + j, v = u[i];
         canon[i] = i;
@@ -822,9 +905,10 @@ function tilesFrom(js) {
         webp[i] = v >>> 31;
         offs[i] = o;
         o += lens[i];
+        blocks[blocks.length - 1][1] = o;
       }
     }
-    return { w: p.w, h: p.h, L, grid, start, lens, webp, offs, blank, canon };
+    return { w: p.w, h: p.h, L, grid, start, lens, webp, offs, blank, canon, blocks, blk: (k) => (small && k < L - sl ? 1 : 0) };
   });
   return { T, pages, share: js.share || null, dpi: js.dpi || 200 };
 }
@@ -905,6 +989,7 @@ function drawTiles(c = null, wm = true) {
     if (want === 0 && s > (pg.grid[0].w / pg.w) * 1.25) scheduleVector(n, s, x0, y0, x1, y1);
     if (!missing && S.tview) { // 這次的畫面已經全部清楚
       S.timing.lastSharp = +(performance.now() - S.tview).toFixed(0);
+      if (S.timing.firstSharp == null && S.t0) { S.timing.firstSharp = +(performance.now() - S.t0).toFixed(0); S.timing.firstSharpNav = Math.round(performance.now()); }
       S.tview = 0;
       document.body.dataset.pdfSharp = String(Date.now());
     }
@@ -972,16 +1057,24 @@ function flushTiles() {
       group.push(q);
       end = Math.max(end, q.off + q.len);
     }
+    // v0.9.0：還沒下載到的話，一次抓這頁的一整段（同一段裡排著的也一起），之後這頁的其他圖磚都在記憶體裡
+    let ra = first.off, rb = end;
+    const pg = S.tl.pages[first.n - 1], bk = pg.blocks[pg.blk(first.k)];
+    if (S.src && !S.src.covered(first.off, end) && bk && bk[1] - bk[0] <= TL.blockMax && group.every((q) => q.off >= bk[0] && q.off + q.len <= bk[1])) {
+      ra = bk[0];
+      rb = bk[1];
+      for (const q of todo) if (!q.sent && q.n === first.n && !group.includes(q) && q.off >= ra && q.off + q.len <= rb) group.push(q);
+    }
     group.forEach((q) => { q.sent = true; });
     S.tinflight++;
     S.tstat.reqs++;
     const token = S.token;
-    S.get(first.off, end - first.off).then(async (buf) => {
+    S.get(ra, rb - ra).then(async (buf) => {
       if (token !== S.token) return;
       S.tstat.bytes += buf.byteLength;
       await Promise.all(group.map(async (q) => {
         try {
-          const blob = new Blob([buf.slice(q.off - first.off, q.off - first.off + q.len)], { type: q.webp ? 'image/webp' : 'image/png' });
+          const blob = new Blob([buf.slice(q.off - ra, q.off - ra + q.len)], { type: q.webp ? 'image/webp' : 'image/png' });
           const bmp = await createImageBitmap(blob);
           if (token !== S.token) { bmp.close && bmp.close(); return; }
           S.tcache.set(tkey(q.n, q.k, q.i), { bmp, px: bmp.width * bmp.height });
@@ -1095,9 +1188,42 @@ export function init(hooks) {
     const b = e.target.closest('.pthumb');
     if (b) go(Number(b.dataset.n));
   });
+  // v0.9.0：離線準備、速度紀錄
+  $('#pdf-net').addEventListener('click', () => { $('#pdf-dl').hidden = false; dlPanel(); });
+  $('#pdf-dl-close').addEventListener('click', () => { $('#pdf-dl').hidden = true; });
+  $('#pdf-dl').addEventListener('click', (e) => { if (e.target.id === 'pdf-dl') $('#pdf-dl').hidden = true; });
+  $('#pdf-dl-save').addEventListener('click', async () => {
+    if (await saveKeep() && ui && ui.toast) ui.toast('已存在這台裝置：現場沒有網路也能開', 3000);
+  });
+  $('#pdf-dl-clear').addEventListener('click', async () => {
+    if (!S.keep) return;
+    await offline.del(S.keep.id);
+    S.keepSaved = false;
+    S.keepTried = true;
+    if (S.keep.cached) S.keep = { ...S.keep, cached: false };
+    netUi();
+    dlPanel();
+    if (ui && ui.toast) ui.toast('已從這台裝置清除', 2500);
+  });
+  const setDebug = (on) => {
+    S.debug = on;
+    try { localStorage.setItem('skpv-debug', on ? '1' : '0'); } catch (e) { /* 略過 */ }
+    $('#pdf-dl-debug').textContent = on ? '不要顯示在畫面角落' : '顯示在畫面角落';
+    clearInterval(S.debugTimer);
+    if (on) S.debugTimer = setInterval(debugUi, 1000);
+    debugUi();
+  };
+  let dbg = new URLSearchParams(location.search).get('debug') === '1';
+  try { dbg = dbg || localStorage.getItem('skpv-debug') === '1'; } catch (e) { /* 略過 */ }
+  setDebug(dbg);
+  $('#pdf-dl-debug').addEventListener('click', () => setDebug(!S.debug));
+  $('#pdf-dl-copy').addEventListener('click', async () => {
+    const t = speedLog();
+    try { await navigator.clipboard.writeText(t); if (ui && ui.toast) ui.toast('速度紀錄已複製，可以貼到 LINE', 3000); } catch (e) { prompt('速度紀錄（長按複製）', t); }
+  });
   // 測試用
   window.skpvPdf = {
-    go, setZoom, info,
+    go, setZoom, info, speedLog: () => JSON.parse(speedLog()), net: () => (S.src ? S.src.stats() : null),
     // 測試用：放大到「每 pt 幾個 CSS 像素」（2.5 ≈ 7 pt 的字 17 px 高，看得清楚）
     zoomToCss(cssPerPt, cx, cy) { const sz = S.sizes.get(S.cur); setZoom(cssPerPt / fitScale(sz), cx, cy); }, get state() { return { cur: S.cur, n: S.n, zoom: +S.zoom.toFixed(3), fit: S.fit, panX: Math.round(S.panX), panY: Math.round(S.panY),
       bases: [...S.bases.keys()], detail: S.detail ? [S.detail.canvas.width, S.detail.canvas.height] : null, wm: S.wm, rendering: S.rendering }; },

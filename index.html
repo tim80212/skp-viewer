@@ -13,6 +13,32 @@
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="stylesheet" href="app.css">
+<script>
+// v0.9.0：開自己的文件（?m=檔案編號、已登入）：網頁一開始就先發下載請求（Google Drive 每個請求都要先等好幾秒），
+// 程式（three.js 等）載入完由 cloud.js 接手；這台裝置上已經有、或不是 PDF 就取消。分享連結不經過這裡。
+(function () {
+  try {
+    var q = new URLSearchParams(location.search), id = q.get('m');
+    if (!id || q.get('pre') === '0' || !window.AbortController || !window.fetch) return;
+    var local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    var base = 'https://www.googleapis.com', tok = null;
+    if (local && /^http:\/\/127\.0\.0\.1:\d+$/.test(q.get('gbase') || '')) { base = q.get('gbase'); tok = q.get('gtoken'); }
+    if (!tok) { var a = JSON.parse(localStorage.getItem('skpv-auth') || 'null'); if (a && a.exp > Date.now() + 60000) tok = a.token; }
+    if (!tok) return;
+    var ctrl = new AbortController(), t0 = performance.now();
+    var res = fetch(base + '/drive/v3/files/' + encodeURIComponent(id) + '?alt=media',
+      { headers: { Authorization: 'Bearer ' + tok, Range: 'bytes=0-' }, cache: 'no-store', credentials: 'omit', signal: ctrl.signal });
+    res.catch(function () {});
+    var pre = { id: id, tok: tok, res: res, t0: t0, abort: function () { ctrl.abort(); } };
+    window.__skpvPre = pre;
+    setTimeout(function () { if (window.__skpvPre === pre) { pre.abort(); window.__skpvPre = null; } }, 30000);
+  } catch (e) { /* 略過：照一般的流程 */ }
+})();
+</script>
+<!-- v0.9.0：程式一次全部開始下載（不用等 app.js 解析完才知道要抓 pdfview.js、pdfdata.js…），開檔的請求早一點發出去 -->
+<link rel="modulepreload" href="app.js"><link rel="modulepreload" href="cloud.js"><link rel="modulepreload" href="config.js">
+<link rel="modulepreload" href="pdfview.js"><link rel="modulepreload" href="pdfdata.js"><link rel="modulepreload" href="offline.js">
+<link rel="modulepreload" href="memory.js"><link rel="modulepreload" href="share.js"><link rel="modulepreload" href="notice.js">
 </head>
 <body>
 <div id="app" class="empty">
@@ -43,7 +69,8 @@
   <nav id="scenes" aria-label="場景"></nav>
 
   <!-- PDF 檢視（v0.7.0）：開 PDF 時取代上面的 3D 畫面、場景列、工具列 -->
-  <div id="pdf-view" aria-label="PDF 頁面"><div id="pdf-page"></div></div>
+  <div id="pdf-view" aria-label="PDF 頁面"><div id="pdf-page"></div>
+    <button id="pdf-net" class="pdf-net" hidden></button><pre id="pdf-debug" hidden></pre></div>
   <nav id="pdf-thumbs" aria-label="頁面縮圖" hidden></nav>
   <footer id="pdf-tools">
     <button class="tool" id="pdf-prev" aria-label="上一頁"><span class="ic">◀</span><span>上一頁</span></button>
@@ -74,6 +101,26 @@
       </ol>
       <p class="small">檔案直接從 Google Drive 下載到這台裝置，不經過其他伺服器。</p>
       <p class="small" id="offline-state"></p>
+    </div>
+  </section>
+
+  <!-- v0.9.0：離線準備（背景下載整份文件；擁有者可以存在這台裝置上） -->
+  <section id="pdf-dl" class="sheet" hidden>
+    <div class="card">
+      <h2>離線</h2>
+      <p id="pdf-dl-text"></p>
+      <p class="small" id="pdf-dl-note">分享給你的文件只放在這一頁的記憶體，關掉網頁就清掉，不會存在這台裝置上。</p>
+      <div class="dl-btns">
+        <button class="btn primary" id="pdf-dl-save" hidden>下載到這台裝置（現場離線用）</button>
+        <button class="btn" id="pdf-dl-clear" hidden>從這台裝置清除</button>
+      </div>
+      <h3>速度紀錄</h3>
+      <p class="small">讀取很慢時，請按「複製速度紀錄」貼給開發者（每個網路請求等了多久、傳了多久）。</p>
+      <div class="dl-btns">
+        <button class="btn" id="pdf-dl-debug">顯示在畫面角落</button>
+        <button class="btn" id="pdf-dl-copy">複製速度紀錄</button>
+        <button class="btn" id="pdf-dl-close">關閉</button>
+      </div>
     </div>
   </section>
 

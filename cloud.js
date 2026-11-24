@@ -2,6 +2,8 @@
 // 範圍 drive.file：只碰「SKP 轉檔上傳」程式上傳的檔案，看不到 Drive 裡其他東西。
 // 模型檔直接從 Google 下載到這台裝置，不經過其他伺服器。
 import { CONFIG } from './config.js';
+import { Source } from './pdfdata.js';
+import * as offline from './offline.js';
 
 const SCOPE = 'https://www.googleapis.com/auth/drive.file openid email';
 const $ = (s) => document.querySelector(s);
@@ -116,8 +118,10 @@ async function api(path, { method = 'GET', query = {}, body, raw = false, useKey
 // ---------- 開啟雲端檔案 ----------
 // PDF（v0.7.0）：不先下載整個檔案，pdf.js 要哪一段就抓哪一段（Drive 支援 Range）。cache:'no-store'、不帶 cookie。
 export function rangeFetcher(url, headers = {}) {
-  return async (begin, end) => {
-    const res = await fetch(url, { headers: { ...headers, Range: `bytes=${begin}-${end - 1}` }, cache: 'no-store', credentials: 'omit' });
+  // v0.9.0：open＝發一個 Range 請求、回傳 Response（pdfdata.js 串流下載、記錄等待／傳輸時間用）
+  const open = (begin, end, signal) => fetch(url, { headers: { ...headers, Range: `bytes=${begin}-${end - 1}` }, cache: 'no-store', credentials: 'omit', signal });
+  const f = async (begin, end) => {
+    const res = await open(begin, end);
     if (res.status === 206) return res.arrayBuffer();
     if (res.ok) { // 伺服器不支援 Range：給整個檔案
       const full = await res.arrayBuffer();
@@ -125,14 +129,37 @@ export function rangeFetcher(url, headers = {}) {
     }
     throw Object.assign(new Error(`Google Drive ${res.status}`), { status: res.status });
   };
+  f.open = open;
+  return f;
 }
 function mediaUrl(id, useKey) {
   return `${DRIVE()}/files/${encodeURIComponent(id)}?alt=media${useKey ? '&key=' + encodeURIComponent(apiKey) : ''}`;
 }
 export const isPdfMeta = (m) => (m && (m.mimeType === 'application/pdf' || /\.pdf$/i.test(m.name || '') || (m.appProperties || {}).kind === 'pdf'));
 
+// v0.9.0：讀檔案資料的同時就先發 bytes=0- 的下載請求（Drive 每個下載請求都要先等好幾秒），是 PDF 就當成背景下載的第一段，不是就取消
+function startPre(id, useKey) {
+  if (params.get('pre') === '0') return null;
+  const early = takeEarly(id);
+  if (early && !useKey && auth && early.tok === auth.token) return early; // index.html 網頁一開始就發出去的
+  if (early) early.abort();
+  const headers = useKey ? {} : auth && auth.token ? { Authorization: 'Bearer ' + auth.token } : null;
+  if (!headers) return null;
+  const ctrl = new AbortController();
+  const t0 = performance.now();
+  const res = fetch(mediaUrl(id, useKey), { headers: { ...headers, Range: 'bytes=0-' }, cache: 'no-store', credentials: 'omit', signal: ctrl.signal });
+  res.catch(() => {});
+  return { res, t0, abort: () => ctrl.abort() };
+}
+
 async function download(id, useKey) {
-  let meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,mimeType,appProperties' }, useKey });
+  const pre = startPre(id, useKey);
+  const dropPre = () => { if (pre) pre.abort(); };
+  let meta;
+  try {
+    meta = await api(`/files/${encodeURIComponent(id)}`, { query: { fields: 'id,name,size,mimeType,appProperties,modifiedTime,md5Checksum,ownedByMe' }, useKey });
+  } catch (e) { dropPre(); throw e; }
+  if (!isPdfMeta(meta)) dropPre();
   const mainName = meta.name;
   const mainReq = id;
   const mobileId = meta.appProperties && meta.appProperties.mobile;
@@ -160,7 +187,12 @@ async function download(id, useKey) {
     if (!useKey && !signedIn()) await signIn();
     const headers = useKey ? {} : { Authorization: 'Bearer ' + auth.token };
     window.__skpvCloudLoaded = { requested: mainReq, loaded: id, mobile: id !== mainReq, pdf: true }; // 測試用
-    return { pdf: { size: Number(meta.size || 0), fetchRange: rangeFetcher(mediaUrl(id, useKey), headers) }, name: meta.name };
+    const rf = rangeFetcher(mediaUrl(id, useKey), headers);
+    // v0.9.0：自己登入、自己的檔案（擁有者）→ 下載完存在這台裝置上（下次秒開、現場沒網路也能開）
+    const keep = !useKey && meta.ownedByMe === true && id === mainReq
+      ? { id, name: meta.name, modifiedTime: meta.modifiedTime || '', md5: meta.md5Checksum || '' } : null;
+    if (id !== mainReq) dropPre(); // 改開手機版：先發的請求是原檔的
+    return { pdf: { size: Number(meta.size || 0), fetchRange: rf, open: rf.open, pre: id === mainReq ? pre : null }, name: meta.name, keep };
   }
   ui.showLoading(`下載 ${meta.name}（${mb(Number(meta.size || 0))}）…`);
   const res = await api(`/files/${encodeURIComponent(id)}`, { query: { alt: 'media' }, raw: true, useKey });
@@ -185,38 +217,87 @@ async function download(id, useKey) {
   return { buf, name: meta.name };
 }
 
+function takeEarly(id) {
+  const e = window.__skpvPre;
+  if (!e) return null;
+  window.__skpvPre = null;
+  if (e.id !== id) { e.abort(); return null; }
+  return e;
+}
+
+// v0.9.0：這台裝置上存的版本（擁有者）→ 直接開（不用等網路），背景再跟雲端比對版本，不一樣就作廢、重新下載
+async function openCached(id, t0) {
+  if (params.get('nocache') === '1') return false;
+  const rec = await offline.get(id);
+  if (!rec || !rec.blob) return false;
+  const early = takeEarly(id);
+  if (early) early.abort(); // 這台裝置上有：網頁一開始先發的下載請求不用了
+  let buf;
+  try { buf = await rec.blob.arrayBuffer(); } catch (e) { await offline.del(id); return false; }
+  await ui.openPdf({ data: buf, cached: true }, rec.name, t0, { keep: { id, name: rec.name, modifiedTime: rec.modifiedTime, md5: rec.md5, cached: true } });
+  window.__skpvCloudLoaded = { requested: id, loaded: id, pdf: true, cached: true }; // 測試用
+  verifyCached(id, rec);
+  return true;
+}
+async function verifyCached(id, rec) {
+  let meta = null;
+  const q = { fields: 'id,modifiedTime,md5Checksum,trashed' };
+  try {
+    auth = auth || loadStored();
+    if (signedIn()) meta = await api(`/files/${encodeURIComponent(id)}`, { query: q });
+    else if (apiKey) meta = await api(`/files/${encodeURIComponent(id)}`, { query: q, useKey: true });
+  } catch (e) {
+    window.__skpvCacheCheck = e.status ? `error ${e.status}` : 'offline'; // 沒網路：照樣用這台裝置上的版本
+    return;
+  }
+  if (!meta) { window.__skpvCacheCheck = 'unknown'; return; }
+  if (meta.trashed) { window.__skpvCacheCheck = 'trashed'; ui.toast('雲端的這份文件已經刪除（這台裝置上的版本還能看）', 4000); return; }
+  if (offline.sameVersion(rec, meta)) { window.__skpvCacheCheck = 'same'; return; }
+  window.__skpvCacheCheck = 'changed';
+  await offline.del(id);
+  if (currentId !== id) return;
+  ui.toast('雲端的文件已經更新（重新最佳化），下載新版…', 4000);
+  openCloud(id);
+}
+
 export async function openCloud(id) {
   ui.showLoading('下載中…');
   const t0 = performance.now();
   try {
-    let got = null;
-    // 1. 先試「有連結就能看」（不用登入）
+    if (await openCached(id, t0)) {
+      afterOpen(id);
+      return;
+    }
+    let got = null, pub = false;
+    // 1. 先試「有連結就能看」（不用登入）。v0.9.0：不再先試抓 1 byte（Drive 每個請求要等好幾秒），讀不到再改用登入
     if (apiKey && !signedIn()) {
       try {
         got = await download(id, true);
-        if (got.pdf) await got.pdf.fetchRange(0, 1); // 公開才讀得到；沒公開就改用登入
+        pub = true;
       } catch (e) { got = null; if (![403, 404].includes(e.status)) throw e; }
     }
-    // 2. 沒分享（或已登入）：用自己的 Google 帳號
-    if (!got) {
+    const login = async () => {
       if (!signedIn() && !loadStored()) {
         ui.hideLoading();
         showLocked(id);
-        return;
+        return null;
       }
       auth = auth || loadStored();
-      got = await download(id, false);
-    }
-    if (got.pdf) await ui.openPdf(got.pdf, got.name, t0);
-    else await ui.loadBuffer(got.buf, got.name, t0);
-    currentId = id;
-    const u = new URL(location.href);
-    ['src', 'm'].forEach((k) => u.searchParams.delete(k));
-    u.searchParams.set('m', id);
-    history.replaceState(null, '', u);
-    $('#cloud').hidden = true;
-    $('#locked').hidden = true;
-    ui.onLoaded && ui.onLoaded();
+      return download(id, false);
+    };
+    // 2. 沒分享（或已登入）：用自己的 Google 帳號
+    if (!got) { got = await login(); if (!got) return; }
+    if (got.pdf) {
+      try {
+        await ui.openPdf(got.pdf, got.name, t0, { keep: got.keep });
+      } catch (e) {
+        if (!pub || ![401, 403, 404].includes(e.status)) throw e;
+        got = await login();
+        if (!got) return;
+        await ui.openPdf(got.pdf, got.name, t0, { keep: got.keep });
+      }
+    } else await ui.loadBuffer(got.buf, got.name, t0);
+    afterOpen(id);
   } catch (err) {
     if (err.shown) return; // 已經顯示原因（例如手機上太大的模型、使用者選擇不開）
     if (err.status === 404) {
@@ -226,6 +307,16 @@ export async function openCloud(id) {
       ui.fail(err);
     }
   }
+}
+function afterOpen(id) {
+  currentId = id;
+  const u = new URL(location.href);
+  ['src', 'm'].forEach((k) => u.searchParams.delete(k));
+  u.searchParams.set('m', id);
+  history.replaceState(null, '', u);
+  $('#cloud').hidden = true;
+  $('#locked').hidden = true;
+  ui.onLoaded && ui.onLoaded();
 }
 
 function showLocked(id, notFound) {
@@ -264,14 +355,76 @@ async function refresh() {
   try {
     const res = await api('/files', { query: {
       q: "appProperties has { key='skpv' and value='1' } and trashed=false",
-      fields: 'files(id,name,size,mimeType,modifiedTime,thumbnailLink,permissionIds,appProperties)',
+      fields: 'files(id,name,size,mimeType,modifiedTime,md5Checksum,ownedByMe,thumbnailLink,permissionIds,appProperties)',
       orderBy: 'modifiedTime desc', pageSize: '200',
     } });
     files = res.files || [];
-    renderList();
+    await renderList();
   } catch (e) {
     if (e.status === 401) { renderSignIn(); return; }
-    renderMsg(e.message);
+    renderMsg(e.status ? e.message : '連不上網路。下面是存在這台裝置上的文件（沒有網路也能開）。');
+    renderDevice();
+  }
+}
+
+// ---------- 存在這台裝置上的文件（v0.9.0，擁有者；現場沒網路也能開）----------
+let dev = new Map(); // id → { id, name, size, modifiedTime, md5, savedAt, bytes }
+const saving = new Map(); // id → 進度 0～1
+async function loadDev() { dev = new Map((await offline.list()).map((r) => [r.id, r])); }
+async function renderDevice() {
+  await loadDev();
+  const box = document.createElement('div');
+  box.id = 'cloud-device';
+  const cloudIds = new Set(files.map((f) => f.id));
+  const only = [...dev.values()].filter((r) => !cloudIds.has(r.id));
+  const total = [...dev.values()].reduce((t, r) => t + (r.bytes || 0), 0);
+  if (!dev.size) { const old = $('#cloud-device'); if (old) old.remove(); return; }
+  box.innerHTML = `<h3 class="dev-h">存在這台裝置上的文件（${dev.size} 份，${mb(total)}）<button class="btn" data-act="devclear">全部清除</button></h3>` +
+    (only.length ? only.map((r) => `<div class="mitem" data-id="${esc(r.id)}"><button class="mopen" data-act="open"><span class="mtext"><b>${esc(r.name.replace(/\.pdf$/i, ''))}</b>
+      <span class="small"><span class="mkind pdf">PDF</span> ${mb(r.bytes || 0)} · 存於 ${esc(fmtTime(r.savedAt))}</span></span></button>
+      <div class="macts"><button class="btn" data-act="undev">從這台裝置清除</button></div></div>`).join('')
+      : '<p class="small">上面清單裡標「已存在這台裝置」的文件，現場沒有網路也能開。</p>');
+  const old = $('#cloud-device');
+  if (old) old.replaceWith(box); else $('#cloud-list').appendChild(box);
+}
+function fmtTime(iso) {
+  const t = new Date(iso);
+  return isNaN(t) ? '' : `${t.getFullYear()}/${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+}
+function devButtons(f) {
+  if (!isPdfMeta(f) || f.ownedByMe === false) return '';
+  if (saving.has(f.id)) return `<button class="btn" disabled>下載中 ${Math.floor(saving.get(f.id) * 100)}%</button>`;
+  const r = dev.get(f.id);
+  if (r && offline.sameVersion(r, f)) return '<span class="mdev">✓ 已存在這台裝置</span><button class="btn" data-act="undev">從這台裝置清除</button>';
+  return `<button class="btn" data-act="dev">${r ? '更新這台裝置上的版本' : '下載到這台裝置（現場離線用）'}</button>`;
+}
+async function saveToDevice(id) {
+  const f = files.find((x) => x.id === id);
+  if (!f || saving.has(id)) return;
+  if (!signedIn()) await signIn();
+  const rf = rangeFetcher(mediaUrl(id, false), { Authorization: 'Bearer ' + auth.token });
+  const src = new Source({ size: Number(f.size || 0), open: rf.open });
+  saving.set(id, 0);
+  if (!src.startFull()) { saving.delete(id); ui.toast('這份文件太大，這台裝置放不下', 4000); return; }
+  await renderList();
+  await new Promise((resolve) => {
+    let last = 0;
+    src.on((x) => {
+      saving.set(id, x.progress);
+      if (x.state !== 'loading') { resolve(); return; }
+      if (performance.now() - last > 500) { last = performance.now(); renderList(); }
+    });
+  });
+  try {
+    if (src.state !== 'done') throw new Error('下載中斷');
+    await offline.put({ id, name: f.name, size: src.size, modifiedTime: f.modifiedTime || '', md5: f.md5Checksum || '', blob: src.blob() });
+    ui.toast(`「${f.name.replace(/\.pdf$/i, '')}」已存在這台裝置：現場沒有網路也能開`, 3500);
+  } catch (e) {
+    ui.toast(e.message === '下載中斷' ? '下載中斷了，請再試一次' : '這台裝置的儲存空間不夠，沒辦法存下來', 4000);
+  } finally {
+    src.close();
+    saving.delete(id);
+    await renderList();
   }
 }
 
@@ -287,10 +440,13 @@ function renderSignIn() {
   $('#cloud-signin').onclick = async () => {
     try { await signIn(); await refresh(); } catch (e) { ui.toast(e.message, 4000); }
   };
+  renderDevice();
 }
-function renderList() {
+async function renderList() {
+  await loadDev();
   if (!files.length) {
     renderMsg('還沒有檔案。請在電腦用「SKP 轉檔上傳」程式選 .skp 或 .pdf 上傳。');
+    renderDevice();
     return;
   }
   $('#cloud-list').innerHTML = files.map((f) => {
@@ -304,9 +460,10 @@ function renderList() {
       <button class="mopen" data-act="open"><span class="mthumb">${thumb}</span>
         <span class="mtext"><b>${esc(name)}</b><span class="small"><span class="mkind ${pdf ? 'pdf' : 'skp'}">${pdf ? 'PDF' : '3D'}</span> ${when} · ${mb(Number(f.size || 0))}${pdf && f.appProperties && f.appProperties.pages ? ` · ${esc(f.appProperties.pages)} 頁` : ''}${!pdf && f.appProperties && f.appProperties.scenes ? ` · ${esc(f.appProperties.scenes)} 個場景` : ''}</span>
         <span class="mshare ${shared ? 'on' : ''}">${shared ? '舊式公開分享中（原檔，沒有期限）' : '只有我'}${f.appProperties && f.appProperties.mobile ? ' · 有手機版' : ''}</span></span></button>
-      <div class="macts">${shared ? '<button class="btn" data-act="share">複製舊式連結</button><button class="btn" data-act="unshare">取消舊式分享</button>'
+      <div class="macts">${devButtons(f)}${shared ? '<button class="btn" data-act="share">複製舊式連結</button><button class="btn" data-act="unshare">取消舊式分享</button>'
         : '<span class="small">分享：用電腦的「SKP 轉檔上傳」新增（每人一條）</span>'}</div></div>`;
   }).join('');
+  renderDevice();
 }
 
 function shareUrl(id) {
@@ -359,14 +516,20 @@ export function init(hooks) {
   $('#cloud-list').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
+    if (b.dataset.act === 'devclear') {
+      if (confirm('把存在這台裝置上的文件全部清除？（雲端的檔案不受影響）')) { await offline.clearAll(); ui.toast('已清除', 2500); if (files.length) await renderList(); else await renderDevice(); }
+      return;
+    }
     const id = b.closest('.mitem').dataset.id;
     try {
       if (b.dataset.act === 'open') await openCloud(id);
       else if (b.dataset.act === 'share') await shareFile(id);
       else if (b.dataset.act === 'unshare') await unshareFile(id);
+      else if (b.dataset.act === 'dev') await saveToDevice(id);
+      else if (b.dataset.act === 'undev') { await offline.del(id); ui.toast('已從這台裝置清除', 2500); if (files.length) await renderList(); else await renderDevice(); }
     } catch (err) { ui.toast(err.message, 4000); }
   });
-  window.skpvCloud = { openCloud, showList, signedIn, get files() { return files; } };
+  window.skpvCloud = { openCloud, showList, signedIn, saveToDevice, offlineList: offline.list, get files() { return files; } };
 }
 
 function mb(bytes) { return bytes < 1048576 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }

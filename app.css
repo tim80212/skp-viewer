@@ -124,7 +124,8 @@ dd { margin: 0; word-break: break-all; }
 .mtext b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mshare { font-size: 11px; color: var(--muted); }
 .mshare.on { color: #2f8132; font-weight: 700; }
-.macts { display: flex; gap: 8px; padding: 0 10px 10px; justify-content: flex-end; }
+.macts { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 10px 10px; justify-content: flex-end; align-items: center; }
+.macts > .small { flex: 1 1 100%; text-align: right; }
 #locked .card .btn { margin-right: 8px; }
 #problem .card { border-top: 6px solid #e0a000; }
 #problem.error .card { border-top-color: var(--accent); }
@@ -213,6 +214,18 @@ dd { margin: 0; word-break: break-all; }
 .pdf-pageno { display: flex; align-items: center; gap: 4px; font-size: 14px; color: var(--muted); white-space: nowrap; }
 #pdf-num { width: 3.2em; height: 28px; text-align: center; font-size: 15px; border: 1px solid var(--line); border-radius: 6px; padding: 0; }
 @media (max-width: 420px) { #pdf-tools .tool span:not(.ic) { display: none; } #pdf-tools #pdf-fit, #pdf-tools #pdf-thumb-btn { font-size: 13px; } }
+/* v0.9.0：離線準備 */
+.pdf-net { position: absolute; top: 8px; right: 8px; z-index: 2; border: 0; border-radius: 14px; padding: 5px 11px; font-size: 12px;
+  background: rgba(255,255,255,.92); color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.25); cursor: pointer; }
+.pdf-net.busy { color: var(--primary); }
+.pdf-net.ok { color: #1a7f37; }
+.pdf-net.warn { color: #b35c00; }
+#pdf-debug { position: absolute; left: 6px; bottom: 6px; z-index: 2; margin: 0; padding: 5px 7px; max-width: calc(100% - 12px); white-space: pre-wrap;
+  font: 11px/1.4 ui-monospace, Consolas, monospace; color: #fff; background: rgba(0,0,0,.6); border-radius: 6px; pointer-events: none; }
+.dl-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+#cloud-device { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
+.dev-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; margin: 4px 0 8px; }
+.mdev { font-size: 12px; color: #1a7f37; white-space: nowrap; }
 /* 分享的文件：不給列印（只擋介面，擋不住截圖） */
 @media print { body.shared * { display: none !important; } body.shared::after { content: '這份文件僅供線上檢視，不提供列印。'; } }
 .mkind { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; color: #fff; background: #52606d; vertical-align: 1px; }
