@@ -173,7 +173,8 @@ async function pageImages(pi, meta) {
   try {
     const r = await Promise.race([pi.res, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))]);
     if (!r.ok) { step(`page images list ${r.status}`, pi.t0); return null; }
-    const files = ((await r.json()).files || []).filter((f) => (f.appProperties || {}).v === a.pagesV);
+    const vs = String(a.pagesV).split(','); // v0.10.4：沒改的頁留著原本的版本，PDF 記著這次用到的版本清單
+    const files = ((await r.json()).files || []).filter((f) => vs.includes((f.appProperties || {}).v));
     step('page images list', pi.t0);
     const m = files.filter((f) => (f.appProperties || {}).b === 'm').length;
     if (!m || m !== Number(a.pages)) return null;
