@@ -88,19 +88,28 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     useSystemFonts: true, stopAtErrors: false,
   };
   // v0.9.0：資料一律經過 Source（pdfdata.js）：開檔就在背景把整個檔案分 4 段下載到記憶體，讀的時候有就直接拿
+  // v0.10.5：src.later（Promise）＝分享連結的每頁圖先看，PDF 等按同意、記錄之後才拿到檔案編號
   if (S.src) { S.src.close(); S.src = null; }
-  const source = src instanceof Source ? src : new Source(src.data ? { data: src.data, cached: !!src.cached } : { size: src.size, open: src.open, pre: src.pre || null });
-  S.src = source;
   S.keep = keep || null;
-  S.bytes = source.size;
-  source.on(() => netUi());
-  source.startFull();
-  netUi();
-  const firstP = source.read(0, Math.min(source.size, FIRST_CHUNK));
+  const mkSource = (x) => (x instanceof Source ? x : new Source(x.data ? { data: x.data, cached: !!x.cached } : { size: x.size, open: x.open, pre: x.pre || null }));
+  const attach = (s) => {
+    S.src = s;
+    S.bytes = s.size;
+    s.on(() => netUi());
+    s.startFull();
+    netUi();
+    return s;
+  };
+  const srcP = src.later
+    ? src.later.then((x) => { const s = mkSource(x); if (token !== S.token) { s.close(); throw new Error('canceled'); } return attach(s); })
+    : Promise.resolve(attach(mkSource(src)));
+  srcP.catch(() => {});
+  const firstP = srcP.then((s) => s.read(0, Math.min(s.size, FIRST_CHUNK)));
   firstP.catch(() => {});
-  S.get = (off, len) => source.read(off, len);
+  S.get = (off, len) => (S.src ? S.src.read(off, len) : srcP.then((s) => s.read(off, len)));
   // v0.10.0：擁有者、有每頁的圖（桌面程式上傳到 Drive，網頁從 lh3 抓）：不用等 Drive 下載 PDF 就能看。PDF 照樣在背景下載（放大看向量、存在裝置上）
-  const imgTl = !share && src.images ? imagesTl(src.images) : null;
+  // v0.10.5：分享連結也一樣（中等整頁圖，src.images.share）
+  const imgTl = src.images ? (src.images.share ? shareImagesTl(src.images) : (!share ? imagesTl(src.images) : null)) : null;
   let first = null;
   if (!imgTl) {
     first = await firstP;
@@ -109,8 +118,9 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     S.timing.headNav = Math.round(performance.now());
     S.head = first;
   }
-  S.mode = source.state === 'done' ? 'data' : 'range';
+  S.mode = S.src && S.src.state === 'done' ? 'data' : 'range';
   const makeParams = (P) => {
+    const source = S.src;
     const tr = new P.PDFDataRangeTransport(source.size, new Uint8Array(first.slice(0)));
     tr.requestDataRange = (begin, end) => {
       S.requests++;
@@ -141,14 +151,24 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     imgTl.pages.forEach((p, i) => S.sizes.set(i + 1, { w: p.w, h: p.h }));
     S.docReady = null;
     S.startDoc = startDoc;
+    S.pdfTl = null;
+    if (imgTl.share) shareInfo = share; // v0.10.5：代號、到期日先用紀錄端點給的（PDF 到了再核對檔案裡寫的）
     // 背景：PDF 的檔頭到了就讀圖磚索引（lh3 的圖抓不到時改用 PDF 的圖磚）
     firstP.then(async (buf) => {
       if (token !== S.token || !isPdf(buf)) return;
       S.head = buf;
       S.timing.headNav = Math.round(performance.now());
       const js = await readIndex(buf);
-      if (token === S.token && js && js.v >= 2) S.pdfTl = tilesFrom(js);
+      if (token !== S.token) return;
+      if (imgTl.share) { // 分享副本：檔案裡的代號、到期時間要和連結一致，不一致就不給看
+        try { checkShare(js && js.v >= 2 ? js.share || null : null, share); } catch (e) {
+          if (ui && ui.showProblem) ui.showProblem('文件開不起來', esc(e.message), true);
+          return;
+        }
+      }
+      if (js && js.v >= 2) S.pdfTl = tilesFrom(js);
       if (S.imgFail && S.pdfTl) usePdfTiles('lh3 failed');
+      else if (S.pdfTl && S.tl && S.tl.share && S.tl.images) requestDraw(); // 已經放大超過中等圖：drawTiles 會換成 PDF 圖磚
     }).catch(() => {});
   } else if (S.pv && S.pv.v >= 2) { // v0.8.0：圖磚，不用 pdf.js（v0.9.0：v3＝第 1 頁和縮圖放前面）
     S.tl = tilesFrom(S.pv);
@@ -202,7 +222,7 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
   S.timing = { ...S.timing, open: +(performance.now() - t0).toFixed(0), preview: !!S.pv };
   await go(1, true);
   S.timing.firstPage = +(performance.now() - t0).toFixed(0);
-  S.timing.bytesAtFirstPage = source.received;
+  S.timing.bytesAtFirstPage = S.src ? S.src.received : 0;
   S.timing.firstPageNav = Math.round(performance.now()); // 從打開網頁算起
   step('pdf first page');
   window.__skpvPdfTiming = S.timing;
@@ -215,7 +235,7 @@ export async function openPdf(src, { name = '', share = null, t0 = performance.n
     }, 1200);
   }
   if (S.keep) keepWhenDone(token);
-  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl, images: !!(S.tl && S.tl.images), full: source.state };
+  return { pages: S.n, share: shareInfo, mode: S.mode, bytes: S.bytes, preview: !!S.pv, tiles: !!S.tl, images: !!(S.tl && S.tl.images), full: S.src ? S.src.state : 'wait' };
 }
 
 // 分享副本（第 2 層）：檔案裡寫著代號和到期時間，過期就不顯示（存了檔、換個方式打開也一樣）
@@ -1025,6 +1045,7 @@ function levelFor(pg, pxPerPt) { // 夠清楚的最粗一層（層和層之間�
   return 0;
 }
 function tkey(n, k, i) { return `${n}/${k}/${i}`; }
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 // 畫一次：c＝目標畫布（預設畫面），wm＝要不要浮水印。回傳「該清楚的那層」還缺幾塊
 function drawTiles(c = null, wm = true) {
   if (!S.tl || !S.open) return 0;
@@ -1072,7 +1093,9 @@ function drawTiles(c = null, wm = true) {
   }
   if (wm && S.wm) watermark(ctx, pg.w * s, pg.h * s, -ox, -oy, canvas.width, canvas.height);
   if (!c) {
-    if (want === 0 && s > (pg.grid[0].w / pg.w) * 1.25) scheduleVector(n, s, x0, y0, x1, y1);
+    if (want === 0 && s > (pg.grid[0].w / pg.w) * 1.25) {
+      if (S.tl.share && S.tl.images) { if (S.pdfTl) { usePdfTiles('zoom'); return missing; } } else scheduleVector(n, s, x0, y0, x1, y1);
+    }
     if (!missing && S.tview) { // 這次的畫面已經全部清楚
       S.timing.lastSharp = +(performance.now() - S.tview).toFixed(0);
       if (S.timing.firstSharp == null && S.t0) { S.timing.firstSharp = +(performance.now() - S.t0).toFixed(0); S.timing.firstSharpNav = Math.round(performance.now()); step('pdf first sharp'); }
@@ -1222,15 +1245,51 @@ function imagesTl(files) {
   }
   return { T: 512, pages, share: null, dpi: 150, images: true };
 }
+// v0.10.5：分享連結的每頁圖（中等整頁，長邊 1600）。pages＝[[圖的編號（第 2 頁起按同意後才有）, 頁寬pt, 頁高pt, 圖寬, 圖高], …]
+// img：{ pages, ids: Promise<[編號…]>（記錄之後才有）, first: { fid, blob: Promise<Blob> }（第 1 頁先抓好的）, link(fid, fresh) → Promise<縮圖網址> }
+function shareImagesTl(img) {
+  const pages = [];
+  for (const p of img.pages || []) {
+    const [, pw, ph, mw, mh] = p.map((x, i) => (i ? Number(x) : x));
+    if (!(pw > 0 && ph > 0 && mw > 0 && mh > 0)) return null;
+    const ts = 240 / Math.max(mw, mh), sw = Math.max(1, Math.round(mw * ts)), sh = Math.max(1, Math.round(mh * ts));
+    const grid = [{ w: mw, h: mh, cols: 1, rows: 1, tw: mw, th: mh }, { w: sw, h: sh, cols: 1, rows: 1, tw: sw, th: sh }];
+    const n = pages.length + 1;
+    pages.push({ w: pw, h: ph, L: 2, grid, start: [1, 0], urls: [{ n, sz: 's240' }, { n, sz: 's0' }],
+      canon: Uint32Array.from([0, 1]), blank: new Uint8Array(2), blocks: [], blk: () => 0 });
+  }
+  if (!pages.length) return null;
+  const ids = img.pages.map((p) => p[0] || '');
+  if (img.ids) img.ids.then((all) => { if (Array.isArray(all) && all.length === ids.length) all.forEach((id, i) => { if (id) ids[i] = id; }); }).catch(() => {});
+  return { T: 512, pages, share: true, dpi: Math.round((pages[0].grid[0].w / pages[0].w) * 72), images: true,
+    fid: async (n) => { if (!ids[n - 1] && img.ids) await img.ids.catch(() => null); return ids[n - 1] || ''; },
+    link: img.link, first: img.first || null };
+}
+async function imageUrl(q, fresh) {
+  if (typeof q.url === 'string') return { url: q.url };
+  const tl = S.tl, fid = await tl.fid(q.url.n);
+  if (!fid) throw new Error('no image id');
+  if (!fresh && tl.first && tl.first.fid === fid && q.url.sz === 's0') { // 第 1 頁：聲明顯示時就先抓好放在記憶體
+    const f = tl.first;
+    tl.first = null;
+    try { return { blob: await f.blob }; } catch (e) { /* 預先抓的失敗：照一般的再抓一次 */ }
+  }
+  return { url: lh3(await tl.link(fid, fresh), q.url.sz) };
+}
 function fetchImage(q) {
   q.sent = true;
   S.tinflight++;
   S.tstat.reqs++;
   const token = S.token, key = tkey(q.n, q.k, q.i), t0 = performance.now();
-  fetch(q.url, { cache: 'no-store', credentials: 'omit' }).then((r) => {
+  const get = async (fresh) => {
+    const u = await imageUrl(q, fresh);
+    if (u.blob) return u.blob;
+    const r = await fetch(u.url, { cache: 'no-store', credentials: 'omit' });
     if (!r.ok) throw Object.assign(new Error(`lh3 ${r.status}`), { status: r.status });
     return r.blob();
-  }).then(async (blob) => {
+  };
+  // 分享的圖：縮圖網址過期（約 80 分鐘）就重新問一次網址再抓一次，還是不行才改用 PDF 的圖磚
+  get(false).catch((e) => (typeof q.url === 'string' || token !== S.token ? Promise.reject(e) : get(true))).then(async (blob) => {
     if (token !== S.token) return;
     S.tstat.bytes += blob.size;
     const bmp = await createImageBitmap(blob);
